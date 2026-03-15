@@ -3,6 +3,7 @@ package index
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 )
 
 /*
@@ -11,36 +12,60 @@ Manifest format
 {
   "version": 1.0,
 
-  "chunks_meta": {
-    "0": {"path": "/data/chunk_0.bin", "total_size": 104857600, "type": "base"},
-    "1": {"path": "/data/chunk_1.bin", "total_size": 104857600, "type": "base"},
-    "delta_1": {"path": "/data/deltas/delta_1.bin", "total_size": 54000, "type": "delta"}
+  "shards_meta": {
+    "0": {"total_size": 104857600, "type": "base"},
+    "1": {"total_size": 104857600, "type": "base"},
+    "2": {"total_size": 54000, "type": "delta"}
   },
 
   "files": {
-    "train/cat.jpg": {"c_id": "0", "offset": 0, "size": 14500, "meta": {"label": 1}},
-    "train/dog.jpg": {"c_id": "1", "offset": 0, "size": 22000, "meta": {"label": 2}},
-    "train/new.jpg": {"c_id": "delta_1", "offset": 0, "size": 54000, "meta": {"label": 1}}
+    "cat.jpg": {"s_id": "0", "offset": 0, "size": 14500, "meta": {"label": 1}},
+    "dog.jpg": {"s_id": "1", "offset": 0, "size": 22000, "meta": {"label": 2}},
+    "new.jpg": {"s_id": "delta_1", "offset": 0, "size": 54000, "meta": {"label": 1}}
   }
 }
 
 */
 
 const (
-	currentVersion = "1.0"
-	fileName       = "metadata.jsonl"
+	currentVersion         = "1.0"
+	manifestFileName       = "metadata.jsonl"
+	ShardSize        int64 = 100 * 1024 * 1024
 )
 
 // Manifest represents how index stores in disk
 // Only Manifest structure interract with disk, not CoreIndex
 type Manifest struct {
 	Version    string              `json:"version"`
-	ChunksMeta map[string]Chunk    `json:"chunks_meta"`
+	ShardsMeta map[int]Shard       `json:"shards_meta"`
 	Files      map[string]Metadata `json:"files"`
+	Root       string              `json:"-"` // Root path of manifest
+}
+
+func NewManifest(root string) *Manifest {
+	return &Manifest{
+		Version:    currentVersion,
+		ShardsMeta: make(map[int]Shard),
+		Files:      make(map[string]Metadata),
+		Root:       root,
+	}
+}
+
+func (m *Manifest) Load() error {
+	file, err := os.Open(filepath.Join(m.Root, manifestFileName))
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if err := json.NewDecoder(file).Decode(m); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (m *Manifest) Store() error {
-	file, err := os.Create(fileName)
+	file, err := os.Create(m.Root + manifestFileName)
 	if err != nil {
 		return err
 	}
@@ -51,34 +76,32 @@ func (m *Manifest) Store() error {
 	return encoder.Encode(m)
 }
 
-func LoadCoreIndex(filepath string) (*CoreIndex, error) {
-	file, err := os.Open(filepath)
-	if err != nil {
-		return nil, err
+func (m *Manifest) AppendShard(shard *Shard) error {
+	m.ShardsMeta[shard.Number] = *shard
+	for _, e := range shard.Objects {
+		m.Files[e.Path] = *e
 	}
-	defer file.Close()
+	return m.Store()
+}
 
-	var mani Manifest
-	if err := json.NewDecoder(file).Decode(&mani); err != nil {
-		return nil, err
-	}
+func (m *Manifest) LoadCoreIndex() (*CoreIndex, error) {
 
 	coreIdx := &CoreIndex{
-		FileMap:  make(map[string]*Metadata, len(mani.Files)),
-		ChunkMap: make(map[string]*Chunk, len(mani.ChunksMeta)),
+		FileMap:  make(map[string]*Metadata, len(m.Files)),
+		ShardMap: make(map[int]*Shard, len(m.ShardsMeta)),
 	}
 
-	for id, chunkValue := range mani.ChunksMeta {
-		chunkCopy := chunkValue
-		coreIdx.ChunkMap[id] = &chunkCopy
+	for id, shardValue := range m.ShardsMeta {
+		shardCopy := shardValue
+		coreIdx.ShardMap[id] = &shardCopy
 	}
 
-	for path, metaValue := range mani.Files {
+	for path, metaValue := range m.Files {
 		metaCopy := metaValue
 		coreIdx.FileMap[path] = &metaCopy
 
-		if chunk, exists := coreIdx.ChunkMap[metaCopy.ChunkID]; exists {
-			chunk.Objects = append(chunk.Objects, &metaCopy)
+		if shard, exists := coreIdx.ShardMap[metaCopy.ShardID]; exists {
+			shard.Objects = append(shard.Objects, &metaCopy)
 		}
 	}
 

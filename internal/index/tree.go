@@ -5,18 +5,18 @@ import (
 	"sync"
 )
 
-type Chunk struct {
-	Path      string `json:"path"`       // Path of chunk
-	Type      string `json:"type"`       // Type of chunk: base, delta
-	TotalSize int    `json:"total_size"` // Size of chunk in bytes
+type Shard struct {
+	Number    int    `json:"-"`          // Number of shard
+	Type      string `json:"type"`       // Type of shard: base, delta
+	TotalSize int64  `json:"total_size"` // Size of shard in bytes
 
 	Objects []*Metadata `json:"-"`
 }
 
 type Metadata struct {
-	ChunkID string `json:"c_id"`    // name of tar archive that stores object
-	Offset  int64  `json:"offset"`  // Offset in chunk
-	Size    int    `json:"size"`    // Size of object in bytes
+	ShardID int    `json:"c_id"`    // name of tar archive that stores object
+	Offset  int64  `json:"offset"`  // Offset in shard
+	Size    int64  `json:"size"`    // Size of object in bytes
 	Deleted bool   `json:"deleted"` // Thumbstone, whether object deleted from dataset
 	Path    string `json:"path"`    // Path of object as it was stored as single file
 
@@ -27,8 +27,16 @@ type Metadata struct {
 type CoreIndex struct {
 	mu sync.RWMutex
 
-	FileMap  map[string]*Metadata // For FUSE and Mutation: object by object path
-	ChunkMap map[string]*Chunk    // For Planner: Chunk by name
+	LastShard int                  // Number of last shard
+	FileMap   map[string]*Metadata // For FUSE and Mutation: object by object path
+	ShardMap  map[int]*Shard       // For Planner: Shard by name
+}
+
+func NewIndex() *CoreIndex {
+	return &CoreIndex{
+		ShardMap: make(map[int]*Shard),
+		FileMap:  make(map[string]*Metadata),
+	}
 }
 
 func (i *CoreIndex) Manifest() Manifest {
@@ -37,12 +45,12 @@ func (i *CoreIndex) Manifest() Manifest {
 
 	mani := Manifest{
 		Version:    currentVersion,
-		ChunksMeta: make(map[string]Chunk, len(i.ChunkMap)),
+		ShardsMeta: make(map[int]Shard, len(i.ShardMap)),
 		Files:      make(map[string]Metadata, len(i.FileMap)),
 	}
 
-	for id, chunk := range i.ChunkMap {
-		mani.ChunksMeta[id] = *chunk
+	for id, shard := range i.ShardMap {
+		mani.ShardsMeta[id] = *shard
 	}
 
 	for path, meta := range i.FileMap {
@@ -50,4 +58,8 @@ func (i *CoreIndex) Manifest() Manifest {
 	}
 
 	return mani
+}
+
+func (i *CoreIndex) AppendShard(shard *Shard) error {
+	return nil
 }
