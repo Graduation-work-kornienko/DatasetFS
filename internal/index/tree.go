@@ -2,13 +2,20 @@ package index
 
 import (
 	"encoding/json"
+	"maps"
 	"sync"
 )
 
+type ShardType string
+
+const (
+	Base ShardType = "base"
+)
+
 type Shard struct {
-	Number    int    `json:"-"`          // Number of shard
-	Type      string `json:"type"`       // Type of shard: base, delta
-	TotalSize int64  `json:"total_size"` // Size of shard in bytes
+	Number    int       `json:"-"`          // Number of shard
+	Type      ShardType `json:"type"`       // Type of shard: base, delta
+	TotalSize int64     `json:"total_size"` // Size of shard in bytes
 
 	Objects []*Metadata `json:"-"`
 }
@@ -61,5 +68,15 @@ func (i *CoreIndex) Manifest() Manifest {
 }
 
 func (i *CoreIndex) AppendShard(shard *Shard) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.ShardMap[shard.Number] = shard
+	for _, e := range shard.Objects {
+		i.FileMap[e.Path] = e
+	}
 	return nil
+}
+
+func (i *CoreIndex) AllShards() map[int]*Shard {
+	return maps.Clone(i.ShardMap)
 }

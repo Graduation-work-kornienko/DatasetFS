@@ -10,6 +10,10 @@ import (
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
 )
 
+const (
+	ShardFormat = "shard_%d"
+)
+
 type Storage struct {
 	Root string // Root of dataset
 }
@@ -21,7 +25,7 @@ func New(root string) *Storage {
 }
 
 func (t *Storage) AppendShard(shard *index.Shard) error {
-	tarPath := filepath.Join(t.Root, fmt.Sprintf("chunk_%d", shard.Number))
+	tarPath := filepath.Join(t.Root, fmt.Sprintf(ShardFormat, shard.Number))
 	file, err := os.Create(tarPath)
 	if err != nil {
 		return err

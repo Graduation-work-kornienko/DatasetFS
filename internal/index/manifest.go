@@ -2,6 +2,7 @@ package index
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -65,7 +66,9 @@ func (m *Manifest) Load() error {
 }
 
 func (m *Manifest) Store() error {
-	file, err := os.Create(m.Root + manifestFileName)
+	filepath := filepath.Join(m.Root, manifestFileName)
+	fmt.Println(filepath)
+	file, err := os.Create(filepath)
 	if err != nil {
 		return err
 	}
@@ -81,7 +84,7 @@ func (m *Manifest) AppendShard(shard *Shard) error {
 	for _, e := range shard.Objects {
 		m.Files[e.Path] = *e
 	}
-	return m.Store()
+	return nil
 }
 
 func (m *Manifest) LoadCoreIndex() (*CoreIndex, error) {

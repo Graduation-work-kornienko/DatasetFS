@@ -14,14 +14,13 @@ import (
 )
 
 // ParseDatasetFolder parses dataset in format https://docs.pytorch.org/vision/stable/generated/torchvision.datasets.DatasetFolder.html#torchvision.datasets.DatasetFolder
-// and returns index manifest structure
-func ParseDatasetFolder(ctx context.Context, mm *manager.MutationManager, root string) (*index.CoreIndex, error) {
+// and returns core index structure
+func ParseDatasetFolder(ctx context.Context, mm *manager.MutationManager, root string) error {
 	entities, err := os.ReadDir(root)
 	if err != nil {
-		return nil, fmt.Errorf("converter.ParseDatasetFolder: %w", err)
+		return fmt.Errorf("converter.ParseDatasetFolder: %w", err)
 	}
 
-	coreIndex := index.NewIndex()
 	fileChan := make(chan *index.Metadata, 1000)
 
 	var readerWg sync.WaitGroup
@@ -73,10 +72,10 @@ func ParseDatasetFolder(ctx context.Context, mm *manager.MutationManager, root s
 	}
 
 	if err := eg.Wait(); err != nil {
-		return nil, fmt.Errorf("dataset parsing failed: %w", err)
+		return fmt.Errorf("dataset parsing failed: %w", err)
 	}
 
-	return coreIndex, nil
+	return nil
 }
 
 func ParseLabelDir(ctx context.Context, folder string, label string, fileChan chan<- *index.Metadata) error {
