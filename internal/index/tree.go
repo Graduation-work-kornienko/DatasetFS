@@ -28,6 +28,8 @@ type Metadata struct {
 	Deleted bool   `json:"deleted"` // Thumbstone, whether object deleted from dataset
 	Path    string `json:"path"`    // Path of object as it was stored as single file
 
+	SlotID int `json:"-"` // used only for dataloading process
+
 	// Store object metadata, e.g. label
 	ObjectMetadata json.RawMessage `json:"meta"`
 }
@@ -45,6 +47,12 @@ func NewIndex() *CoreIndex {
 		ShardMap: make(map[int]*Shard),
 		FileMap:  make(map[string]*Metadata),
 	}
+}
+
+func (i *CoreIndex) AllShards() map[int]*Shard {
+	i.Mu.RLock()
+	defer i.Mu.RUnlock()
+	return maps.Clone(i.ShardMap)
 }
 
 func (i *CoreIndex) MarkDeleted(filename string) error {
@@ -97,8 +105,4 @@ func (i *CoreIndex) AppendShard(shard *Shard) error {
 		i.FileMap[e.Path] = e
 	}
 	return nil
-}
-
-func (i *CoreIndex) AllShards() map[int]*Shard {
-	return maps.Clone(i.ShardMap)
 }

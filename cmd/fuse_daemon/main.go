@@ -7,7 +7,10 @@ import (
 	"syscall"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
+	"github.com/Graduation-work-kornienko/DatasetFS/internal/ipc"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/manager"
+	"github.com/Graduation-work-kornienko/DatasetFS/internal/pipeline"
+	"github.com/Graduation-work-kornienko/DatasetFS/internal/shm"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/storage"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/vfs"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -26,7 +29,18 @@ func main() {
 	}
 	log.Println("Loaded")
 
+	alloc, err := shm.NewAllocator()
+	if err != nil {
+		log.Fatalf("Ошибка создания Shared Memory: %v", err)
+	}
+	defer alloc.Close()
 	strg := &storage.Storage{Root: rootPath}
+
+	dataPipeline := pipeline.NewPipeline(coreIdx, strg, alloc)
+	defer dataPipeline.Stop()
+
+	go ipc.StartServer(dataPipeline)
+
 	mutMgr := manager.NewMutationManager(coreIdx, mnfst, nil, strg)
 
 	root := &vfs.RootNode{
