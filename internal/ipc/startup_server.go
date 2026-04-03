@@ -13,5 +13,5 @@ func StartServer(pipeline *pipeline.Pipeline) {
 		pipeline.Initiate()
 	})
 
-	http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(":51409", nil)
 }

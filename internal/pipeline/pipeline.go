@@ -25,12 +25,12 @@ func NewPipeline(
 	alloc *shm.Allocator,
 ) *Pipeline {
 
-	loaderChan := make(chan *LoadJob, 10)
-	freeSlotChan := make(chan int, shm.NumSlots)
-	metaChan := make(chan *SlotMeta, 10)
+	loaderChan := make(chan *LoadJob, 100)
+	freeSlotChan := make(chan int, 100)
+	metaChan := make(chan *SlotMeta, 100)
 
 	planner := NewPlanner(coreIdx, alloc, loaderChan, freeSlotChan)
-	loader := NewBackgroundLoader(strg, alloc, loaderChan, metaChan)
+	loader := NewBackgroundLoader(strg, alloc, loaderChan, metaChan, freeSlotChan)
 
 	ctx, cancel := context.WithCancel(context.Background())
 

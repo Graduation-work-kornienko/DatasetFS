@@ -17,13 +17,19 @@ const (
 	pipePath = "/tmp/datasetfs_pipe"
 )
 
+type Metadata struct {
+	index.Metadata
+
+	SlotID int `json:"slot_id"`
+}
+
 type SlotMeta struct {
-	Objects []*index.Metadata
+	Objects []*Metadata
 	SlotID  int
 }
 
 type Batch struct {
-	Items []*index.Metadata
+	Items []*Metadata `json:"items"`
 }
 
 func DealerWorker(
@@ -44,7 +50,7 @@ func DealerWorker(
 	encoder := json.NewEncoder(pipeFile)
 
 	for {
-		var shadowPool []*index.Metadata
+		var shadowPool []*Metadata
 		isEOF := false
 
 		for i := 0; i < WindowSize; i++ {
@@ -53,9 +59,11 @@ func DealerWorker(
 				return
 			case slotMeta, ok := <-metaIn:
 				if !ok {
+					log.Printf("[Dealer] Поймали закрытый канал и решили что все")
 					isEOF = true
 					break
 				}
+				log.Printf("[Dealer] Пришел слот %d", slotMeta.SlotID)
 				shadowPool = append(shadowPool, slotMeta.Objects...)
 
 				allocator.SetRefCount(slotMeta.SlotID, int32(len(slotMeta.Objects)))
@@ -65,9 +73,12 @@ func DealerWorker(
 			}
 		}
 
+		log.Printf("[Dealer] ✅ Загружено окно размером %d", len(shadowPool))
+
 		if len(shadowPool) == 0 {
 			// signal for dataloader - stop
-			encoder.Encode(Batch{Items: []*index.Metadata{}})
+			log.Printf("[Dealer] Отправили команду окончания")
+			encoder.Encode(Batch{Items: []*Metadata{}})
 			return
 		}
 
@@ -87,14 +98,15 @@ func DealerWorker(
 			}
 
 			// TODO: remove named pipe and make ring buffer in shared memory for batches
-
+			log.Printf("[Dealer] Отправляем в pipe")
 			if err := encoder.Encode(batch); err != nil {
 				return
 			}
 		}
 
 		if isEOF {
-			encoder.Encode(Batch{Items: []*index.Metadata{}})
+			log.Printf("[Dealer] Отправили команду окончания")
+			encoder.Encode(Batch{Items: []*Metadata{}})
 			return
 		}
 

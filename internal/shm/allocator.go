@@ -10,7 +10,7 @@ import (
 
 const (
 	NumSlots  = 9
-	SlotSize  = 100 * 1024 * 1024 // 100 MB
+	SlotSize  = 110 * 1024 * 1024 // 110 MB
 	TotalSize = NumSlots * SlotSize
 )
 

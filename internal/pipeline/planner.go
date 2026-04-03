@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"time"
 
@@ -42,7 +43,13 @@ func (p *Planner) Initiate(ctx context.Context) error {
 
 	go func() {
 		for _, sID := range shardIDs {
+			fmt.Println()
+			if sID == -1 {
+				continue
+			}
 			targetSlot := <-p.freeSlotChan
+
+			fmt.Printf("got free slot %d for shard %d\n", targetSlot, sID)
 
 			job := &LoadJob{
 				ShardID: sID,
@@ -67,7 +74,7 @@ func (p *Planner) WatchRefCounts(ctx context.Context) {
 		p.freeSlotChan <- i
 	}
 
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -76,11 +83,13 @@ func (p *Planner) WatchRefCounts(ctx context.Context) {
 			return
 		case <-ticker.C:
 			for i := 0; i < shm.NumSlots; i++ {
-				if p.allocator.ReadRefCount(i) == 0 && !slotIsFree[i] {
+				d := p.allocator.ReadRefCount(i)
+				if d == 0 && !slotIsFree[i] {
+					fmt.Printf("slot %d is going to be used\n", i)
 					slotIsFree[i] = true
 
 					p.freeSlotChan <- i
-				} else if p.allocator.ReadRefCount(i) != 0 && slotIsFree[i] {
+				} else if d != 0 && slotIsFree[i] {
 					slotIsFree[i] = false
 				}
 			}

@@ -28,8 +28,6 @@ type Metadata struct {
 	Deleted bool   `json:"deleted"` // Thumbstone, whether object deleted from dataset
 	Path    string `json:"path"`    // Path of object as it was stored as single file
 
-	SlotID int `json:"-"` // used only for dataloading process
-
 	// Store object metadata, e.g. label
 	ObjectMetadata json.RawMessage `json:"meta"`
 }

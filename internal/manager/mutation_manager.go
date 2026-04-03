@@ -36,6 +36,12 @@ func NewMutationManager(idx *index.CoreIndex, m *index.Manifest, wal *index.WAL,
 		}
 	}
 	idx.Mu.Unlock()
+	tar.AppendShard(&index.Shard{
+		Number:    -1,
+		Type:      "delta",
+		TotalSize: 0,
+		Objects:   nil,
+	})
 	return &MutationManager{
 		mu:        &sync.Mutex{},
 		coreIndex: idx,

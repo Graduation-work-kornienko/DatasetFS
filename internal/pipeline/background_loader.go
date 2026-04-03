@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 
-	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/shm"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/storage"
 )
@@ -16,14 +15,16 @@ type BackgroundLoader struct {
 	allocator    *shm.Allocator
 	loaderChan   <-chan *LoadJob
 	metadataChan chan<- *SlotMeta
+	freeSlotChan chan int
 }
 
-func NewBackgroundLoader(strg *storage.Storage, alloc *shm.Allocator, req <-chan *LoadJob, res chan<- *SlotMeta) *BackgroundLoader {
+func NewBackgroundLoader(strg *storage.Storage, alloc *shm.Allocator, req <-chan *LoadJob, res chan<- *SlotMeta, freeSlotChan chan int) *BackgroundLoader {
 	return &BackgroundLoader{
 		storage:      strg,
 		allocator:    alloc,
 		loaderChan:   req,
 		metadataChan: res,
+		freeSlotChan: freeSlotChan,
 	}
 }
 
@@ -34,6 +35,8 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case job := <-b.loaderChan:
+
+			log.Printf("[Loader] Нужно загрузить Слот %d", job.SlotID)
 
 			shardPath := b.storage.ShardPath(job.ShardID)
 			file, err := os.Open(shardPath)
@@ -52,12 +55,15 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 				continue
 			}
 
-			var validMeta []*index.Metadata
+			var validMeta []*Metadata
 			globalSlotStartOffset := int64(job.SlotID * shm.SlotSize)
 
 			for _, meta := range job.Shard.Objects {
 				if !meta.Deleted {
-					localMeta := *meta
+					localMeta := Metadata{
+						Metadata: *meta,
+						SlotID:   job.SlotID,
+					}
 
 					localMeta.Offset = globalSlotStartOffset + meta.Offset
 					localMeta.SlotID = job.SlotID
@@ -66,7 +72,13 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 				}
 			}
 
-			log.Printf("[Loader] ✅ Загружен Слот %d (Валидных файлов: %d). Передаю ディлеру.", job.SlotID, len(validMeta))
+			log.Printf("[Loader] Загружен Слот %d (Валидных файлов: %d). Передаю Dealer.", job.SlotID, len(validMeta))
+
+			if len(validMeta) == 0 {
+				b.freeSlotChan <- job.SlotID
+				continue
+			}
+			log.Printf("[Loader] ✅ Загружен Слот %d (Валидных файлов: %d). Передаю Dealer.", job.SlotID, len(validMeta))
 
 			b.metadataChan <- &SlotMeta{
 				Objects: validMeta,
