@@ -2,6 +2,7 @@ package index
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"sync"
 )
@@ -32,7 +33,7 @@ type Metadata struct {
 }
 
 type CoreIndex struct {
-	mu sync.RWMutex
+	Mu sync.RWMutex
 
 	LastShard int                  // Number of last shard
 	FileMap   map[string]*Metadata // For FUSE and Mutation: object by object path
@@ -46,9 +47,30 @@ func NewIndex() *CoreIndex {
 	}
 }
 
+func (i *CoreIndex) MarkDeleted(filename string) error {
+	i.Mu.Lock()
+	defer i.Mu.Unlock()
+	if _, ok := i.FileMap[filename]; !ok {
+		return fmt.Errorf("no such file %s", filename)
+	}
+	i.FileMap[filename].Deleted = true
+	return nil
+}
+
+func (i *CoreIndex) AddFile(m *Metadata) error {
+	i.Mu.Lock()
+	defer i.Mu.Unlock()
+	if _, ok := i.ShardMap[m.ShardID]; !ok {
+		return fmt.Errorf("add file %s: no such shard %d", m.Path, m.ShardID)
+	}
+	i.ShardMap[m.ShardID].Objects = append(i.ShardMap[m.ShardID].Objects, m)
+	i.FileMap[m.Path] = m
+	return nil
+}
+
 func (i *CoreIndex) Manifest() Manifest {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
+	i.Mu.RLock()
+	defer i.Mu.RUnlock()
 
 	mani := Manifest{
 		Version:    currentVersion,
@@ -68,8 +90,8 @@ func (i *CoreIndex) Manifest() Manifest {
 }
 
 func (i *CoreIndex) AppendShard(shard *Shard) error {
-	i.mu.Lock()
-	defer i.mu.Unlock()
+	i.Mu.Lock()
+	defer i.Mu.Unlock()
 	i.ShardMap[shard.Number] = shard
 	for _, e := range shard.Objects {
 		i.FileMap[e.Path] = e

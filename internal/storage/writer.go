@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -37,6 +36,10 @@ func (s *Storage) HandleWebdatasetShard(
 
 	currentObjects := make([]*index.Metadata, 0)
 	metaKeeper := make(map[string]*index.Metadata, 5000)
+	mu.Lock()
+	currentShardId = *shardID
+	*shardID++
+	mu.Unlock()
 
 	sourceFile, err := os.Open(tarPath)
 	if err != nil {
@@ -46,12 +49,16 @@ func (s *Storage) HandleWebdatasetShard(
 
 	tarReader := tar.NewReader(sourceFile)
 
+	if err := s.createWriter(&currentFile, &currentTw, currentShardId); err != nil {
+		return err
+	}
+
 	cnt := 0
 
 	for {
 		cnt++
 		header, err := tarReader.Next()
-		if err == io.EOF {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
 		if err != nil {
@@ -91,7 +98,7 @@ func (s *Storage) HandleWebdatasetShard(
 		}
 		// fmt.Println(currentSize)
 
-		if currentTw == nil || currentSize > index.ShardSize {
+		if currentSize > index.ShardSize {
 			fmt.Println("change")
 			if currentTw != nil {
 				currentTw.Close()
@@ -109,29 +116,34 @@ func (s *Storage) HandleWebdatasetShard(
 			currentObjects = make([]*index.Metadata, 0)
 
 			mu.Lock()
-			*shardID++
 			currentShardId = *shardID
+			*shardID++
 			mu.Unlock()
-			filename := s.ShardPath(currentShardId)
 
-			file, err := os.Create(filename)
-			if err != nil {
-				return fmt.Errorf("creating DatasetFS shard: %w", err)
+			if err := s.createWriter(&currentFile, &currentTw, currentShardId); err != nil {
+				return err
 			}
 
-			currentFile = file
 			currentSize = 0
 			currentTargetOffset = 0
-			currentTw = tar.NewWriter(currentFile)
+		}
+
+		cleanFileName := filepath.Base(header.Name)
+
+		cleanHdr := &tar.Header{
+			Name:   cleanFileName,
+			Mode:   0600,
+			Size:   header.Size,
+			Format: tar.FormatGNU,
 		}
 
 		meta.ShardID = currentShardId
-
-		meta.Path = strconv.Itoa(currentShardId) + filepath.Base(header.Name)
+		meta.Path = cleanFileName
 		meta.Offset = currentTargetOffset + 512
 		meta.Size = header.Size
+		currentObjects = append(currentObjects, meta)
 
-		if err := currentTw.WriteHeader(header); err != nil {
+		if err := currentTw.WriteHeader(cleanHdr); err != nil {
 			return fmt.Errorf("failed to write tar header for %s: %w", header.Name, err)
 		}
 
@@ -144,12 +156,8 @@ func (s *Storage) HandleWebdatasetShard(
 			return fmt.Errorf("size mismatch: expected %d, wrote %d", header.Size, written)
 		}
 
-		if meta.ObjectMetadata != nil {
-			currentObjects = append(currentObjects, meta)
+		delete(metaKeeper, filename)
 
-		}
-
-		// 4.4 Вычисляем сдвиг с учетом паддинга
 		var padding int64 = 0
 		remainder := written % 512
 		if remainder != 0 {
@@ -178,5 +186,17 @@ func (s *Storage) HandleWebdatasetShard(
 		shardChan <- &shard
 	}
 
+	return nil
+}
+
+func (s *Storage) createWriter(file **os.File, tw **tar.Writer, shardID int) error {
+	fmt.Println(shardID)
+	filename := s.ShardPath(shardID)
+	f, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create shard %s: %w", filename, err)
+	}
+	*file = f
+	*tw = tar.NewWriter(f)
 	return nil
 }

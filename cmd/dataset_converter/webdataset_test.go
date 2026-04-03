@@ -18,8 +18,10 @@ func TestWebdataset(t *testing.T) {
 
 	targetDir = "test"
 	sourceDir = "."
+	err := os.RemoveAll("test")
+	require.NoError(t, err)
 
-	err := os.MkdirAll(targetDir, 0755)
+	err = os.MkdirAll(targetDir, 0755)
 	require.NoError(t, err)
 
 	coreIndex := index.NewIndex()

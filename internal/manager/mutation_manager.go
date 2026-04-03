@@ -1,8 +1,11 @@
 package manager
 
 import (
+	"archive/tar"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"sync"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
@@ -22,6 +25,17 @@ type MutationManager struct {
 
 func NewMutationManager(idx *index.CoreIndex, m *index.Manifest, wal *index.WAL, tar *storage.Storage) *MutationManager {
 	var lastShard int = 0
+	deltaShardID := -1
+	idx.Mu.Lock()
+	if _, ok := idx.ShardMap[deltaShardID]; !ok {
+		idx.ShardMap[deltaShardID] = &index.Shard{
+			Number:    deltaShardID,
+			Type:      "delta",
+			TotalSize: 0,
+			Objects:   make([]*index.Metadata, 0),
+		}
+	}
+	idx.Mu.Unlock()
 	return &MutationManager{
 		mu:        &sync.Mutex{},
 		coreIndex: idx,
@@ -30,6 +44,85 @@ func NewMutationManager(idx *index.CoreIndex, m *index.Manifest, wal *index.WAL,
 		storage:   tar,
 		lastShard: &lastShard,
 	}
+}
+
+// DeleteFile обрабатывает FUSE вызов `rm`
+func (m *MutationManager) DeleteFile(filename string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.coreIndex.MarkDeleted(filename); err != nil {
+		return err
+	}
+
+	// m.walWriter.LogDelete(filename)
+
+	return nil
+}
+
+// AddDeltaFile обрабатывает FUSE вызов `cp` / `mv` (создание файла)
+func (m *MutationManager) AddDeltaFile(logicalName string, tmpFilePath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	stat, err := os.Stat(tmpFilePath)
+	if err != nil {
+		return err
+	}
+	fileSize := stat.Size()
+
+	deltaPath := m.storage.ShardPath(-1)
+
+	deltaFile, err := os.OpenFile(deltaPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer deltaFile.Close()
+
+	deltaStat, _ := deltaFile.Stat()
+	currentEndOffset := deltaStat.Size()
+
+	tw := tar.NewWriter(deltaFile)
+
+	hdr := &tar.Header{
+		Name:   logicalName,
+		Mode:   0644,
+		Size:   fileSize,
+		Format: tar.FormatGNU,
+	}
+
+	if err := tw.WriteHeader(hdr); err != nil {
+		return err
+	}
+
+	srcFile, err := os.Open(tmpFilePath)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	written, err := io.Copy(tw, srcFile)
+	if err != nil {
+		return err
+	}
+
+	tw.Close()
+
+	meta := &index.Metadata{
+		ShardID: -1, // delta
+		Path:    logicalName,
+		Size:    written,
+		Offset:  currentEndOffset + 512,
+		Deleted: false,
+	}
+
+	if err := m.coreIndex.AddFile(meta); err != nil {
+		return err
+	}
+
+	// m.walWriter.LogAdd(meta)
+
+	return nil
 }
 
 // Simply Append shard(for dataset initialization only)
@@ -65,7 +158,10 @@ func (m *MutationManager) AppendWebDatasetShards(ctx context.Context, tarPaths [
 	}
 
 	// get all from metachan and
+	wg := sync.WaitGroup{}
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for shard := range shardChan {
 			fmt.Println("got shard", shard.Number, shard.TotalSize)
 			m.coreIndex.AppendShard(shard)
@@ -77,6 +173,7 @@ func (m *MutationManager) AppendWebDatasetShards(ctx context.Context, tarPaths [
 	}
 	close(shardChan)
 
+	wg.Wait()
 	return nil
 }
 
