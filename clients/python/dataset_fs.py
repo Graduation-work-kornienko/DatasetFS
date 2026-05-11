@@ -3,6 +3,8 @@ import mmap
 import struct
 from torch.utils.data import IterableDataset
 from PIL import Image
+import select
+import PIL
 import io
 import torchvision.transforms as transforms
 import requests
@@ -17,6 +19,7 @@ class DatasetFS(IterableDataset):
         self.shm_data_path = shm_data_path
         self.shm_refs_path = shm_refs_path
         self.pipe_path = pipe_path
+        self.timeout_seconds = 0.1
 
         self.transform = transform or transforms.Compose([
             transforms.ToTensor()
@@ -47,15 +50,38 @@ class DatasetFS(IterableDataset):
             with open(self.pipe_path, "r") as pipe:
                 print("[Python] Pipe подключен")
 
-                for line in pipe:
-                    batch_meta = json.loads(line)
+                while True:
+                    ready_to_read, _, _ = select.select([pipe], [], [], self.timeout_seconds)
 
-                    if not batch_meta.get("items"):
-                        print("[Python] Датасет полностью прочитан (Конец Эпохи).")
+                    if not ready_to_read:
+                        # Если список пустой, значит прошло timeout_seconds, а данных нет
+                        print(f"[Python] Таймаут ({self.timeout_seconds}s): данных нет. Завершаем эпоху.")
                         break
 
+                    # 2. Если данные есть, читаем одну строку
+                    line = pipe.readline()
+
+                    if not line:
+                        # EOF (конец файла/пайпа)
+                        print("[Python] Получен EOF. Завершаем эпоху.")
+                        break
+
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    try:
+                        batch_meta = json.loads(line)
+                    except json.JSONDecodeError as e:
+                        print(f"[Python] Ошибка парсинга JSON: {e}")
+                        continue
+
+                    if not batch_meta.get("items"):
+                        print("[Python] Датасет полностью прочитан (Пустой батч). Конец эпохи.")
+                        break
+
+
                     for item in batch_meta["items"]:
-                        print(item.keys())
                         slot_id = item["slot_id"]
                         offset = item["offset"]
                         size = item["size"]
@@ -63,25 +89,29 @@ class DatasetFS(IterableDataset):
                         raw_jpeg = data_mmap[offset : offset + size]
 
                         # TODO:  nvJPEG
-                        image = Image.open(io.BytesIO(raw_jpeg))
-                        tensor = self.transform(image)
+                        try:
+                            image = Image.open(io.BytesIO(raw_jpeg))
+                            tensor = self.transform(image)
 
-                        result = {"image": tensor}
+                            result = {"image": tensor}
 
-                        if "meta" in item and item["meta"]:
-                            meta_data = item["meta"]
+                            if "meta" in item and item["meta"]:
+                                meta_data = item["meta"]
 
-                            if isinstance(meta_data, dict):
-                                result.update(meta_data)
-                            elif isinstance(meta_data, list):
-                                result["annotations"] = meta_data
-                            else:
-                                result["meta_raw"] = meta_data
+                                if isinstance(meta_data, dict):
+                                    result.update(meta_data)
+                                elif isinstance(meta_data, list):
+                                    result["annotations"] = meta_data
+                                else:
+                                    result["meta_raw"] = meta_data
 
-                        # decrement counters
-                        self._decrement_refcount(refs_mmap, slot_id)
+                            # decrement counters
+                            self._decrement_refcount(refs_mmap, slot_id)
 
-                        yield result
+                            yield result
+                        except (PIL.UnidentifiedImageError, OSError):
+                            continue
+
 
             data_mmap.close()
             refs_mmap.close()

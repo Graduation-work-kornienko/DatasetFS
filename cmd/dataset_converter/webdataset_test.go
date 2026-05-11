@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
-	"github.com/Graduation-work-kornienko/DatasetFS/internal/index/converter"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/manager"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/storage"
 	"github.com/stretchr/testify/require"
@@ -32,7 +31,7 @@ func TestWebdataset(t *testing.T) {
 	ctx := context.Background()
 	mutationManager := manager.NewMutationManager(coreIndex, manifest, wal, storage)
 
-	err = converter.ParseWebDataset(ctx, mutationManager, sourceDir)
+	err = ParseWebDataset(ctx, mutationManager, sourceDir)
 	require.NoError(t, err)
 
 	mutationManager.Shutdown()

@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
-	"github.com/Graduation-work-kornienko/DatasetFS/internal/index/converter"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/manager"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/storage"
 
@@ -25,14 +24,14 @@ var (
 		Short: "Convert a DatasetFolder format to DatasetFS format",
 		Long:  "Convert a DatasetFolder format to DatasetFS format",
 		Args:  cobra.ExactArgs(2),
-		RunE:  generateConvertCommand(converter.ParseDatasetFolder),
+		RunE:  generateConvertCommand(ParseDatasetFolder),
 	}
 
 	webDataset = &cobra.Command{
 		Use:   "webdataset",
 		Short: "Convert a Webdataset format to DatasetFS format",
 		Args:  cobra.ExactArgs(2),
-		RunE:  generateConvertCommand(converter.ParseWebDataset),
+		RunE:  generateConvertCommand(ParseWebDataset),
 	}
 
 	sourceDir string

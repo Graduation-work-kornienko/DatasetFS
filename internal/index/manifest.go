@@ -108,5 +108,9 @@ func (m *Manifest) LoadCoreIndex() (*CoreIndex, error) {
 		}
 	}
 
+	for id, shard := range coreIdx.ShardMap {
+		fmt.Println(id, len(shard.Objects))
+	}
+
 	return coreIdx, nil
 }

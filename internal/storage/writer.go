@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
 )
@@ -23,8 +22,7 @@ type WDSMetadataFile struct {
 // metaChan - channel, receive index.Metadata to CoreIndex
 func (s *Storage) HandleWebdatasetShard(
 	tarPath string,
-	shardID *int,
-	mu *sync.Mutex,
+	shardIdChan <-chan int,
 	shardChan chan<- *index.Shard,
 ) error {
 
@@ -36,10 +34,9 @@ func (s *Storage) HandleWebdatasetShard(
 
 	currentObjects := make([]*index.Metadata, 0)
 	metaKeeper := make(map[string]*index.Metadata, 5000)
-	mu.Lock()
-	currentShardId = *shardID
-	*shardID++
-	mu.Unlock()
+	currentShardId = <-shardIdChan
+
+	fmt.Println(currentShardId)
 
 	sourceFile, err := os.Open(tarPath)
 	if err != nil {
@@ -94,7 +91,7 @@ func (s *Storage) HandleWebdatasetShard(
 
 		// fmt.Println(meta)
 		if cnt%100 == 0 {
-			fmt.Println(cnt, currentSize)
+			fmt.Println(currentShardId)
 		}
 		// fmt.Println(currentSize)
 
@@ -115,10 +112,7 @@ func (s *Storage) HandleWebdatasetShard(
 			shardChan <- &shard
 			currentObjects = make([]*index.Metadata, 0)
 
-			mu.Lock()
-			currentShardId = *shardID
-			*shardID++
-			mu.Unlock()
+			currentShardId = <-shardIdChan
 
 			if err := s.createWriter(&currentFile, &currentTw, currentShardId); err != nil {
 				return err

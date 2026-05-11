@@ -156,12 +156,27 @@ func (m *MutationManager) AppendShard(shard *index.Shard) error {
 func (m *MutationManager) AppendWebDatasetShards(ctx context.Context, tarPaths []string) error {
 	eg, ctx := errgroup.WithContext(ctx)
 	shardChan := make(chan *index.Shard, 100)
+	shardIdChan := make(chan int)
 
 	for _, tarPath := range tarPaths {
 		eg.Go(func() error {
-			return m.storage.HandleWebdatasetShard(tarPath, m.lastShard, m.mu, shardChan)
+			return m.storage.HandleWebdatasetShard(tarPath, shardIdChan, shardChan)
 		})
 	}
+
+	go func() {
+		id := *m.lastShard
+		for {
+			for {
+				select {
+				case shardIdChan <- id:
+					id++
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
 
 	// get all from metachan and
 	wg := sync.WaitGroup{}

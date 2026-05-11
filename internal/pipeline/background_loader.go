@@ -72,7 +72,7 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 				}
 			}
 
-			log.Printf("[Loader] Загружен Слот %d (Валидных файлов: %d). Передаю Dealer.", job.SlotID, len(validMeta))
+			log.Printf("[Loader] Загружен Слот %d , шард %d файлов %d (Валидных файлов: %d). Передаю Dealer.", job.SlotID, job.ShardID, len(job.Shard.Objects), len(validMeta))
 
 			if len(validMeta) == 0 {
 				b.freeSlotChan <- job.SlotID
