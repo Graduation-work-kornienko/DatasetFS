@@ -1,0 +1,31 @@
+# Batch-size sweep: how do loaders scale with batch granularity?
+# Small batches = more per-batch overhead (more pipe/IPC roundtrips for DFS,
+# more tar-frame parses for WebDataset). Large batches = better amortization
+# but more memory pressure. Plot: x=batch_size, y=samples_per_second.
+#
+# 4 values × 3 loaders × 3 seeds = 36 cells.
+
+matrix:
+  batch_size: [16, 32, 64, 128]
+
+# Fixed:
+dataset:
+  name: imagenette
+  imagefolder: data/formats/imagenette/imagefolder
+  webdataset: data/formats/imagenette/webdataset
+  datasetfs: data/formats/imagenette/datasetfs
+
+model: resnet18
+num_workers: 4
+image_size: 96
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 60
+
+seeds: [0, 1, 2]
+loaders: [imagefolder, webdataset, datasetfs]
+
+drop_page_cache_between_cells: true
+
+daemon_binary: bin/fuse_daemon

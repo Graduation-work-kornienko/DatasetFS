@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
+	"github.com/Graduation-work-kornienko/DatasetFS/internal/metrics"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/shm"
 )
 
@@ -76,6 +77,7 @@ func DealerWorker(
 			if !ok {
 				log.Printf("[Dealer] Канал закрыт, эпоха завершена")
 				encoder.Encode(Batch{Items: []*Metadata{}})
+				metrics.EpochsCompletedTotal.Add(1)
 				return
 			}
 			log.Printf("[Dealer] Пришел слот %d", slotMeta.SlotID)
@@ -116,11 +118,14 @@ func DealerWorker(
 			if err := encoder.Encode(batch); err != nil {
 				return
 			}
+			metrics.DealerBatchesSentTotal.Add(1)
+			metrics.SamplesEmittedTotal.Add(int64(end - i))
 		}
 
 		if isEOF {
 			log.Printf("[Dealer] Отправили команду окончания")
 			encoder.Encode(Batch{Items: []*Metadata{}})
+			metrics.EpochsCompletedTotal.Add(1)
 			return
 		}
 	}

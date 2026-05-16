@@ -5,7 +5,9 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 
+	"github.com/Graduation-work-kornienko/DatasetFS/internal/metrics"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/shm"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/storage"
 )
@@ -44,6 +46,7 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 
 			log.Printf("[Loader] Нужно загрузить Слот %d", job.SlotID)
 
+			loadStart := time.Now()
 			shardPath := b.storage.ShardPath(job.ShardID)
 			file, err := os.Open(shardPath)
 			if err != nil {
@@ -53,13 +56,18 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 
 			targetSlice := b.allocator.GetSlotBuffer(job.SlotID)
 
-			_, err = io.ReadFull(file, targetSlice[:job.Shard.TotalSize])
+			n, err := io.ReadFull(file, targetSlice[:job.Shard.TotalSize])
 			file.Close()
 
 			if err != nil {
 				log.Printf("[Loader] ❌ Ошибка io.ReadFull для шарда %d: %v", job.ShardID, err)
 				continue
 			}
+
+			// Successful load: record latency and bytes.
+			metrics.LoadLatency.Record(time.Since(loadStart))
+			metrics.ShardLoadsTotal.Add(1)
+			metrics.BytesReadTotal.Add(int64(n))
 
 			var validMeta []*Metadata
 			globalSlotStartOffset := int64(job.SlotID * shm.SlotSize)

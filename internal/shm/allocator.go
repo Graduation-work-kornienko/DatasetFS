@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"unsafe"
+
+	"github.com/Graduation-work-kornienko/DatasetFS/internal/metrics"
 )
 
 const (
@@ -63,7 +65,13 @@ func (a *Allocator) GetSlotBuffer(slotID int) []byte {
 }
 
 func (a *Allocator) SetRefCount(slotID int, count int32) {
-	atomic.StoreInt32(&a.refsMap[slotID], count)
+	// If the slot's prior refcount is nonzero when we set a new one, the
+	// consumer never finished draining the previous batch — a lifecycle bug
+	// that would silently corrupt downstream pipelines.
+	prev := atomic.SwapInt32(&a.refsMap[slotID], count)
+	if prev != 0 {
+		metrics.RefcountOverflowTotal.Add(1)
+	}
 }
 
 func (a *Allocator) ReadRefCount(slotID int) int32 {

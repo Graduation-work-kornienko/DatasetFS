@@ -115,6 +115,12 @@ class DaemonManager:
         self.stop()
         self.start()
 
+    @property
+    def pid(self) -> int | None:
+        """OS pid of the running daemon process, or None if not running.
+        Used by SystemSampler to track daemon RSS alongside the Python tree."""
+        return self._proc.pid if self._proc is not None and self._proc.poll() is None else None
+
     def __enter__(self):
         self.start()
         return self

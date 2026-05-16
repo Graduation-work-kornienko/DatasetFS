@@ -1,0 +1,31 @@
+# Workers sweep: how does throughput scale with DataLoader worker count?
+# Canonical ML-benchmark figure. Plot: x=num_workers, y=samples_per_second,
+# one line per loader, error band across seeds.
+#
+# 4 values × 3 loaders × 3 seeds = 36 cells. Each cell trains 1 warmup +
+# 1 measured epoch capped at 60 batches → ~30-40s/cell on CPU → ~20-25 min.
+
+matrix:
+  num_workers: [0, 2, 4, 8]
+
+# Fixed across all cells:
+dataset:
+  name: imagenette
+  imagefolder: data/formats/imagenette/imagefolder
+  webdataset: data/formats/imagenette/webdataset
+  datasetfs: data/formats/imagenette/datasetfs
+
+model: resnet18
+batch_size: 64
+image_size: 96
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 60
+
+seeds: [0, 1, 2]
+loaders: [imagefolder, webdataset, datasetfs]
+
+drop_page_cache_between_cells: true
+
+daemon_binary: bin/fuse_daemon

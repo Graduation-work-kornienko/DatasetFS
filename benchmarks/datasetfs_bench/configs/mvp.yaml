@@ -22,4 +22,9 @@ max_batches_per_epoch: 80
 seeds: [0, 1, 2]
 loaders: [imagefolder, webdataset, datasetfs]
 
+# Drop OS page cache before each cell for fair cold-cache I/O comparison.
+# Requires passwordless sudo for `purge` (macOS) or `drop_caches` (Linux).
+# If not configured, the runner logs a warning and continues uncontrolled.
+drop_page_cache_between_cells: true
+
 daemon_binary: bin/fuse_daemon

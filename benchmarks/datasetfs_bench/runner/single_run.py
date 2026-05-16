@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import random
 import shutil
 import sys
@@ -42,9 +43,11 @@ if str(REPO_ROOT) not in sys.path:
 from benchmarks.datasetfs_bench.loaders.datasetfs import DatasetFSLoader
 from benchmarks.datasetfs_bench.loaders.imagefolder import ImageFolderLoader
 from benchmarks.datasetfs_bench.loaders.webdataset_loader import WebDatasetLoader
+from benchmarks.datasetfs_bench.metrics import daemon as daemon_metrics
+from benchmarks.datasetfs_bench.metrics.system import SystemSampler
 from benchmarks.datasetfs_bench.metrics.training import EpochStats
 from benchmarks.datasetfs_bench.models.registry import build_model
-from benchmarks.datasetfs_bench.runner import host_info
+from benchmarks.datasetfs_bench.runner import cache_control, host_info
 from benchmarks.datasetfs_bench.runner.daemon_ctl import DaemonManager
 from benchmarks.datasetfs_bench.train.loop import train_one_epoch
 
@@ -96,8 +99,8 @@ def _run_one_cell(
     seed: int,
     out_dir: Path,
     daemon: DaemonManager | None,
-) -> list[EpochStats]:
-    """Run one (loader, seed) cell, returning per-epoch stats."""
+) -> tuple[list[EpochStats], dict, dict]:
+    """Run one (loader, seed) cell, returning (epoch_stats, system_summary, daemon_summary)."""
     print(f"\n=== {loader_name} seed={seed} ===", flush=True)
     _set_all_seeds(seed)
 
@@ -113,6 +116,15 @@ def _run_one_cell(
     optim = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
     loss_fn = nn.CrossEntropyLoss()
 
+    # Track Python tree + daemon (if DFS) for per-process RSS.
+    track_pids = [os.getpid()]
+    if loader_name == "datasetfs" and daemon is not None and daemon.pid is not None:
+        track_pids.append(daemon.pid)
+
+    sampler = SystemSampler(interval_s=0.2, track_pids=track_pids)
+    daemon_before = daemon_metrics.snapshot() if loader_name == "datasetfs" else {}
+
+    sampler.start()
     stats: list[EpochStats] = []
     try:
         for epoch in range(cfg["epochs"]):
@@ -134,37 +146,40 @@ def _run_one_cell(
             # bleeding across epochs.
             del it, dl
     finally:
+        sampler.stop()
         loader.teardown()
 
-    return stats
+    daemon_after = daemon_metrics.snapshot() if loader_name == "datasetfs" else {}
+    return stats, sampler.summary(), daemon_metrics.cell_summary(daemon_before, daemon_after)
 
 
 def _write_summary(out_dir: Path, rows: list[dict]) -> None:
     csv_path = out_dir / "summary.csv"
     if not rows:
         return
-    fieldnames = list(rows[0].keys())
+    # Union of all keys — different loaders contribute different fields
+    # (daemon_* only on DatasetFS rows). Missing values render as "".
+    fieldnames: list[str] = []
+    seen: set[str] = set()
+    for r in rows:
+        for k in r:
+            if k not in seen:
+                seen.add(k)
+                fieldnames.append(k)
     with open(csv_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
     print(f"\n[runner] wrote {csv_path}", flush=True)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
-    args = parser.parse_args()
+def run_config(cfg: dict, out_dir: Path) -> list[dict]:
+    """Run all (loader, seed) cells for one config; return per-epoch summary rows.
 
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
-
-    out_dir: Path = args.output
+    Side effects: writes `summary.csv`, `host_info.json`, optional `daemon.log`
+    into `out_dir`. Used both by single_run.main and by sweep.py.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Snapshot config + host info into the run dir.
-    shutil.copy(args.config, out_dir / "config.yaml")
     host_info.write(out_dir / "host_info.json")
 
     label_to_idx = _label_to_idx(Path(cfg["dataset"]["imagefolder"]))
@@ -182,27 +197,69 @@ def main() -> int:
             log_path=out_dir / "daemon.log",
         )
 
+    drop_caches = cfg.get("drop_page_cache_between_cells", False)
+    if drop_caches and not cache_control.can_drop_caches():
+        print(
+            "[runner] WARN: drop_page_cache_between_cells=true but `sudo -n` "
+            "is not configured for the cache-drop command. Cells will run "
+            "with whatever cache state the previous run left behind. "
+            "Configure passwordless sudo for `purge` (macOS) or "
+            "`drop_caches` (Linux) for honest cold-cache numbers.",
+            flush=True,
+        )
+        drop_caches = False
+
     summary_rows: list[dict] = []
     try:
         for loader_name in cfg["loaders"]:
             for seed in cfg["seeds"]:
-                stats = _run_one_cell(
+                # Drop OS page cache before each cell for fair I/O measurement.
+                cache_state = "uncontrolled"
+                if drop_caches:
+                    if cache_control.drop_page_cache():
+                        cache_state = "cold"
+                    else:
+                        cache_state = "uncontrolled"
+
+                ep_stats, sys_summary, dmn_summary = _run_one_cell(
                     loader_name, cfg, label_to_idx, seed, out_dir, daemon,
                 )
-                for ep in stats:
+                for ep in ep_stats:
                     row: dict[str, Any] = {
                         "loader": loader_name,
                         "seed": seed,
                         "warmup": ep.epoch < cfg.get("warmup_epochs", 0),
+                        "cache_state": cache_state,
                     }
                     row.update(ep.summary())
+                    # System + daemon metrics are per-CELL not per-epoch, but we
+                    # attach them to every epoch row to keep the schema flat.
+                    # Plot code can dedupe by (loader, seed) when needed.
+                    row.update({f"sys_{k}": v for k, v in sys_summary.items()})
+                    row.update(dmn_summary)
                     summary_rows.append(row)
                 _write_summary(out_dir, summary_rows)  # incremental persist
     finally:
         if daemon is not None:
             daemon.stop()
 
-    print(f"\n[runner] DONE. Output: {out_dir}", flush=True)
+    print(f"\n[runner] cell complete. Output: {out_dir}", flush=True)
+    return summary_rows
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args()
+
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
+
+    out_dir: Path = args.output
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(args.config, out_dir / "config.yaml")
+    run_config(cfg, out_dir)
     return 0
 
 

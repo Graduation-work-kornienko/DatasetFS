@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
+	"github.com/Graduation-work-kornienko/DatasetFS/internal/metrics"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/shm"
 )
 
@@ -78,21 +79,31 @@ func (p *Planner) Initiate(ctx context.Context) error {
 		defer close(p.loaderChan)
 
 		for _, sID := range myShardIDs {
+			// Try non-blocking first to detect starvation (planner waiting
+			// for consumer to free a slot) — informative bottleneck signal.
+			var targetSlot int
 			select {
 			case <-ctx.Done():
 				return
-			case targetSlot := <-p.freeSlotChan:
-				log.Printf("[Planner w=%d] got free slot %d for shard %d", p.cfg.WorkerID, targetSlot, sID)
-				job := &LoadJob{
-					ShardID: sID,
-					SlotID:  targetSlot,
-					Shard:   shards[sID],
-				}
+			case targetSlot = <-p.freeSlotChan:
+			default:
+				metrics.SlotStarvationTotal.Add(1)
 				select {
 				case <-ctx.Done():
 					return
-				case p.loaderChan <- job:
+				case targetSlot = <-p.freeSlotChan:
 				}
+			}
+			log.Printf("[Planner w=%d] got free slot %d for shard %d", p.cfg.WorkerID, targetSlot, sID)
+			job := &LoadJob{
+				ShardID: sID,
+				SlotID:  targetSlot,
+				Shard:   shards[sID],
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case p.loaderChan <- job:
 			}
 		}
 	}()

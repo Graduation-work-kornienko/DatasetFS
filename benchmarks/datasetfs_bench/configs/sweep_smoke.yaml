@@ -1,5 +1,9 @@
-# Tiny config for verifying the runner end-to-end. 1 seed, 1 epoch,
-# very few batches. Should run in ~2-3 min total on CPU.
+# Tiny sweep config for verifying the sweep runner end-to-end.
+# 2 axis values × 3 loaders × 1 seed = 6 cells. Each cell runs 1 epoch capped
+# at 10 batches → roughly 1-2 min total on CPU.
+
+matrix:
+  num_workers: [2, 4]
 
 dataset:
   name: imagenette
@@ -9,17 +13,16 @@ dataset:
 
 model: simplecnn
 batch_size: 32
-num_workers: 2
 image_size: 64
 
 epochs: 1
 warmup_epochs: 0
-max_batches_per_epoch: 20
+max_batches_per_epoch: 10
 
 seeds: [0]
 loaders: [imagefolder, webdataset, datasetfs]
 
-# Smoke runs don't drop caches (faster + doesn't need sudo).
+# Smoke runs skip the cache drop (faster + doesn't require sudo).
 drop_page_cache_between_cells: false
 
 daemon_binary: bin/fuse_daemon

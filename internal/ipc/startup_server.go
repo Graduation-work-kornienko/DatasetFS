@@ -5,9 +5,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof/* on the default mux
 	"sync"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
+	"github.com/Graduation-work-kornienko/DatasetFS/internal/metrics"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/pipeline"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/shm"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/storage"
@@ -30,6 +32,7 @@ func (s *session) stop() {
 	if s.alloc != nil {
 		s.alloc.Close()
 	}
+	metrics.ActivePipelines.Store(0)
 }
 
 var (
@@ -41,6 +44,8 @@ func StartServer(coreIdx *index.CoreIndex, rootPath string) {
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+
+	http.HandleFunc("/metrics", metrics.Handler())
 
 	http.HandleFunc("/initialize_loading", func(w http.ResponseWriter, r *http.Request) {
 		numWorkers := 1
@@ -93,6 +98,7 @@ func StartServer(coreIdx *index.CoreIndex, rootPath string) {
 			s.pipelines = append(s.pipelines, p)
 		}
 		currentSession = s
+		metrics.ActivePipelines.Store(int32(numWorkers))
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]int{"num_workers": numWorkers})

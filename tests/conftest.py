@@ -206,6 +206,12 @@ class DaemonManager:
         self.stop()
         self.start()
 
+    @property
+    def pid(self) -> int | None:
+        """OS pid of the running daemon, or None if not running. Lets long
+        tests sample its RSS via psutil."""
+        return self._proc.pid if self._proc is not None and self._proc.poll() is None else None
+
 
 @pytest.fixture
 def daemon(daemon_binary: Path, imagenette_prepared: dict[str, Path], repo_root: Path):
