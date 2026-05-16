@@ -1,6 +1,8 @@
 package ipc
 
 import (
+	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -11,34 +13,89 @@ import (
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/storage"
 )
 
+type initRequest struct {
+	NumWorkers int     `json:"num_workers"`
+	Seed       *uint64 `json:"seed,omitempty"`
+}
+
+type session struct {
+	alloc     *shm.Allocator
+	pipelines []*pipeline.Pipeline
+}
+
+func (s *session) stop() {
+	for _, p := range s.pipelines {
+		p.Stop()
+	}
+	if s.alloc != nil {
+		s.alloc.Close()
+	}
+}
+
 var (
-	mu              sync.Mutex
-	currentAlloc    *shm.Allocator
-	currentPipeline *pipeline.Pipeline
+	mu             sync.Mutex
+	currentSession *session
 )
 
 func StartServer(coreIdx *index.CoreIndex, rootPath string) {
-	var err error
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 
 	http.HandleFunc("/initialize_loading", func(w http.ResponseWriter, r *http.Request) {
-
-		mu.Lock()
-
-		if currentPipeline != nil {
-			currentPipeline.Stop()
-			currentAlloc.Close()
+		numWorkers := 1
+		var seed *uint64
+		if body, err := io.ReadAll(r.Body); err == nil && len(body) > 0 {
+			var req initRequest
+			if jerr := json.Unmarshal(body, &req); jerr != nil {
+				http.Error(w, "invalid JSON: "+jerr.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.NumWorkers > 0 {
+				numWorkers = req.NumWorkers
+			}
+			seed = req.Seed
+		}
+		if numWorkers > shm.NumSlots {
+			http.Error(w, "num_workers exceeds NumSlots (9)", http.StatusBadRequest)
+			return
 		}
 
-		mu.Unlock()
+		mu.Lock()
+		defer mu.Unlock()
 
-		currentAlloc, err = shm.NewAllocator()
+		if currentSession != nil {
+			currentSession.stop()
+			currentSession = nil
+		}
+
+		alloc, err := shm.NewAllocator()
 		if err != nil {
-			log.Fatalf("Ошибка создания Shared Memory: %v", err)
+			log.Printf("[IPC] Ошибка создания Shared Memory: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 		strg := &storage.Storage{Root: rootPath}
 
-		currentPipeline = pipeline.NewPipeline(coreIdx, strg, currentAlloc)
-		currentPipeline.Initiate()
+		s := &session{alloc: alloc}
+		for wID := 0; wID < numWorkers; wID++ {
+			start, end := pipeline.SlotRange(wID, numWorkers)
+			cfg := pipeline.WorkerConfig{
+				WorkerID:   wID,
+				NumWorkers: numWorkers,
+				SlotStart:  start,
+				SlotEnd:    end,
+				PipePath:   pipeline.PipePath(wID),
+				Seed:       seed,
+			}
+			p := pipeline.NewPipeline(coreIdx, strg, alloc, cfg)
+			p.Initiate()
+			s.pipelines = append(s.pipelines, p)
+		}
+		currentSession = s
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]int{"num_workers": numWorkers})
 	})
 
 	http.ListenAndServe(":51409", nil)

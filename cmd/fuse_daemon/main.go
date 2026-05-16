@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -16,30 +17,35 @@ import (
 )
 
 func main() {
-	rootPath := "cmd/dataset_converter/test"
-	mnfst := index.NewManifest(rootPath)
+	rootPath := flag.String("root", "cmd/dataset_converter/test", "Path to DatasetFS converted dataset (manifest + shards)")
+	mountPoint := flag.String("mount", "./dataset_mount", "FUSE mount point (ignored with --no-mount)")
+	noMount := flag.Bool("no-mount", false, "Skip FUSE mount (run IPC + pipeline only). Useful for tests / non-FUSE hosts")
+	flag.Parse()
+
+	mnfst := index.NewManifest(*rootPath)
 	mnfst.Load()
 	coreIdx, err := mnfst.LoadCoreIndex()
-
-	// return
 	if err != nil {
 		log.Fatalf("load core index fail: %v\n", err)
 	}
 	log.Println("Loaded")
 
-	// alloc, err := shm.NewAllocator()
-	// if err != nil {
-	// 	log.Fatalf("Ошибка создания Shared Memory: %v", err)
-	// }
-	// defer alloc.Close()
-	strg := &storage.Storage{Root: rootPath}
+	strg := &storage.Storage{Root: *rootPath}
 
-	// dataPipeline := pipeline.NewPipeline(coreIdx, strg, alloc)
-	// defer dataPipeline.Stop()
-
-	go ipc.StartServer(coreIdx, rootPath)
+	go ipc.StartServer(coreIdx, *rootPath)
 
 	mutMgr := manager.NewMutationManager(coreIdx, mnfst, nil, strg)
+
+	if *noMount {
+		log.Println("Running without FUSE mount (--no-mount)")
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		<-c
+		log.Println("Saving manifest")
+		mutMgr.Shutdown()
+		log.Println("Daemon stopped")
+		return
+	}
 
 	root := &vfs.RootNode{
 		CoreIdx: coreIdx,
@@ -48,11 +54,9 @@ func main() {
 	}
 
 	log.Println("Mounting")
-	mountPoint := "./dataset_mount"
-	os.MkdirAll(mountPoint, 0755)
-	server, err := fs.Mount(mountPoint, root, &fs.Options{
+	os.MkdirAll(*mountPoint, 0755)
+	server, err := fs.Mount(*mountPoint, root, &fs.Options{
 		MountOptions: fuse.MountOptions{
-			// Debug:  true,
 			FsName: "DatasetFS",
 			Name:   "DatasetFS",
 			Options: []string{
@@ -61,7 +65,6 @@ func main() {
 				"noappledouble",
 				"noapplexattr",
 			},
-			// AllowOther: true,
 		},
 	})
 	log.Println("Mounted")
@@ -75,15 +78,13 @@ func main() {
 	go func() {
 		<-c
 		log.Println("\nUnmounting...")
-
 		err := server.Unmount()
 		if err != nil {
 			log.Printf("Unmount error: %v", err)
 		}
 	}()
 
-	log.Printf("Successfully mounted DatasetFS %s", mountPoint)
-
+	log.Printf("Successfully mounted DatasetFS %s", *mountPoint)
 	server.Wait()
 
 	log.Println("Saving manifest")

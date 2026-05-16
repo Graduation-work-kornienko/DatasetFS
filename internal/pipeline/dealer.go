@@ -13,9 +13,16 @@ import (
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/shm"
 )
 
-const (
-	pipePath = "/tmp/datasetfs_pipe"
-)
+// shufflePool shuffles in place, using the given rng if non-nil, else the
+// package-level global rand.
+func shufflePool(rng *rand.Rand, pool []*Metadata) {
+	swap := func(i, j int) { pool[i], pool[j] = pool[j], pool[i] }
+	if rng != nil {
+		rng.Shuffle(len(pool), swap)
+	} else {
+		rand.Shuffle(len(pool), swap)
+	}
+}
 
 type Metadata struct {
 	index.Metadata
@@ -36,7 +43,15 @@ func DealerWorker(
 	ctx context.Context,
 	metaIn <-chan *SlotMeta,
 	allocator *shm.Allocator,
+	pipePath string,
+	rng *rand.Rand,
 ) {
+	// WindowSize bounds how many SlotMetas we *may* merge for one emit cycle
+	// (for cross-shard shuffling), but we never BLOCK waiting to reach it —
+	// only the FIRST SlotMeta is awaited, then we drain whatever else is
+	// already available. This avoids deadlock when a worker has fewer slots
+	// than shards (slots can't be freed until Python consumes a batch, which
+	// requires the dealer to emit).
 	const WindowSize = 3
 	if err := ensurePipe(pipePath); err != nil {
 		log.Fatalf("[Dealer] Критическая ошибка: %v", err)
@@ -53,38 +68,42 @@ func DealerWorker(
 		var shadowPool []*Metadata
 		isEOF := false
 
-		for i := 0; i < WindowSize; i++ {
-			select {
-			case <-ctx.Done():
+		// Block on the first SlotMeta of this batch — ctx cancellation also OK.
+		select {
+		case <-ctx.Done():
+			return
+		case slotMeta, ok := <-metaIn:
+			if !ok {
+				log.Printf("[Dealer] Канал закрыт, эпоха завершена")
+				encoder.Encode(Batch{Items: []*Metadata{}})
 				return
+			}
+			log.Printf("[Dealer] Пришел слот %d", slotMeta.SlotID)
+			shadowPool = append(shadowPool, slotMeta.Objects...)
+			allocator.SetRefCount(slotMeta.SlotID, int32(len(slotMeta.Objects)))
+		}
+
+		// Drain whatever else is *immediately* available, up to WindowSize total.
+		// Non-blocking: as soon as no SlotMeta is ready, stop and emit.
+	drain:
+		for i := 1; i < WindowSize; i++ {
+			select {
 			case slotMeta, ok := <-metaIn:
 				if !ok {
-					log.Printf("[Dealer] Поймали закрытый канал и решили что все")
 					isEOF = true
-					break
+					break drain
 				}
-				log.Printf("[Dealer] Пришел слот %d", slotMeta.SlotID)
+				log.Printf("[Dealer] Дренировали слот %d", slotMeta.SlotID)
 				shadowPool = append(shadowPool, slotMeta.Objects...)
-
 				allocator.SetRefCount(slotMeta.SlotID, int32(len(slotMeta.Objects)))
-			}
-			if isEOF {
-				break
+			default:
+				break drain
 			}
 		}
 
-		log.Printf("[Dealer] ✅ Загружено окно размером %d", len(shadowPool))
+		log.Printf("[Dealer] ✅ Окно размера %d (eof=%v)", len(shadowPool), isEOF)
 
-		if len(shadowPool) == 0 {
-			// signal for dataloader - stop
-			log.Printf("[Dealer] Отправили команду окончания")
-			encoder.Encode(Batch{Items: []*Metadata{}})
-			return
-		}
-
-		rand.Shuffle(len(shadowPool), func(i, j int) {
-			shadowPool[i], shadowPool[j] = shadowPool[j], shadowPool[i]
-		})
+		shufflePool(rng, shadowPool)
 
 		const BatchSize = 256
 		for i := 0; i < len(shadowPool); i += BatchSize {
@@ -93,12 +112,7 @@ func DealerWorker(
 				end = len(shadowPool)
 			}
 
-			batch := Batch{
-				Items: shadowPool[i:end],
-			}
-
-			// TODO: remove named pipe and make ring buffer in shared memory for batches
-			log.Printf("[Dealer] Отправляем в pipe")
+			batch := Batch{Items: shadowPool[i:end]}
 			if err := encoder.Encode(batch); err != nil {
 				return
 			}
@@ -109,7 +123,6 @@ func DealerWorker(
 			encoder.Encode(Batch{Items: []*Metadata{}})
 			return
 		}
-
 	}
 }
 

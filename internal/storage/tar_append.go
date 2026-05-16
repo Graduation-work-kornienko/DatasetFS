@@ -72,5 +72,9 @@ func (t *Storage) AppendShard(shard *index.Shard) error {
 		currentOffset += 512 + written + padding
 	}
 
+	// Record the total data-portion size so the loader knows how many bytes
+	// to read from this shard into shared memory.
+	shard.TotalSize = currentOffset
+
 	return nil
 }

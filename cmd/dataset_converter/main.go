@@ -23,7 +23,6 @@ var (
 		Use:   "dataset-folder",
 		Short: "Convert a DatasetFolder format to DatasetFS format",
 		Long:  "Convert a DatasetFolder format to DatasetFS format",
-		Args:  cobra.ExactArgs(2),
 		RunE:  generateConvertCommand(ParseDatasetFolder),
 	}
 

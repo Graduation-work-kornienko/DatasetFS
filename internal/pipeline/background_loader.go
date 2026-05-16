@@ -29,12 +29,18 @@ func NewBackgroundLoader(strg *storage.Storage, alloc *shm.Allocator, req <-chan
 }
 
 func (b *BackgroundLoader) Launch(ctx context.Context) {
+	// Closing metadataChan downstream lets DealerWorker know the epoch is done.
+	defer close(b.metadataChan)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case job := <-b.loaderChan:
+		case job, ok := <-b.loaderChan:
+			if !ok {
+				// Planner has scheduled all shards; drain done.
+				return
+			}
 
 			log.Printf("[Loader] Нужно загрузить Слот %d", job.SlotID)
 

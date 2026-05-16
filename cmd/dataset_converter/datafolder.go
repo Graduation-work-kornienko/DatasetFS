@@ -26,7 +26,15 @@ func ParseDatasetFolder(ctx context.Context, mm *manager.MutationManager, root s
 	var readerWg sync.WaitGroup
 	eg, ctx := errgroup.WithContext(ctx)
 	for _, e := range entities {
-		if e.IsDir() {
+		// Use os.Stat to follow symlinks — the prepared imagefolder uses
+		// per-class symlinks so this directory may contain symlinks to dirs
+		// rather than real dirs. DirEntry.IsDir() uses lstat and returns false
+		// for symlinks, which would skip every class.
+		info, err := os.Stat(filepath.Join(root, e.Name()))
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
 			dirName := e.Name()
 			readerWg.Add(1)
 

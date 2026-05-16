@@ -8,6 +8,11 @@
 *.jsonl
 *.tar
 
+# Test/benchmark data (large, downloadable)
+data/
+bin/
+runs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
