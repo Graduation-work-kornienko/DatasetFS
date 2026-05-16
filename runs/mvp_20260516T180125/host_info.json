@@ -1,0 +1,11 @@
+{
+  "system": "Darwin",
+  "release": "24.6.0",
+  "machine": "arm64",
+  "processor": "arm",
+  "python": "3.13.7",
+  "cpu_count_logical": 12,
+  "hostname": "MacBook-Pro.local",
+  "ram_bytes": 38654705664,
+  "git_sha": "66185163fec399371925c5852cdb381292e85531"
+}

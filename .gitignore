@@ -11,7 +11,11 @@
 # Test/benchmark data (large, downloadable)
 data/
 bin/
-runs/
+!runs/
+runs/*
+!runs/mvp_*/
+!runs/mvp_*/host_info.json
+!runs/mvp_*/throughput_bar.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

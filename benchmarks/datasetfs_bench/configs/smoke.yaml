@@ -1,0 +1,22 @@
+# Tiny config for verifying the runner end-to-end. 1 seed, 1 epoch,
+# very few batches. Should run in ~2-3 min total on CPU.
+
+dataset:
+  name: imagenette
+  imagefolder: data/formats/imagenette/imagefolder
+  webdataset: data/formats/imagenette/webdataset
+  datasetfs: data/formats/imagenette/datasetfs
+
+model: simplecnn
+batch_size: 32
+num_workers: 2
+image_size: 64
+
+epochs: 1
+warmup_epochs: 0
+max_batches_per_epoch: 20
+
+seeds: [0]
+loaders: [imagefolder, webdataset, datasetfs]
+
+daemon_binary: bin/fuse_daemon

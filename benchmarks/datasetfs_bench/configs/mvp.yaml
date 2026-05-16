@@ -1,0 +1,25 @@
+# MVP config: ONE useful graph.
+# Compares 3 loaders on Imagenette, 2 epochs, 3 seeds. Capped batches so the
+# total run is ~10-15 min CPU. Extend in Phase 3 for the full thesis matrix.
+
+dataset:
+  name: imagenette
+  imagefolder: data/formats/imagenette/imagefolder
+  webdataset: data/formats/imagenette/webdataset
+  datasetfs: data/formats/imagenette/datasetfs
+
+model: resnet18
+batch_size: 64
+num_workers: 4
+image_size: 96            # smaller than canonical 224 → CPU-feasible
+
+# How many epochs, capped batches per epoch.
+# warmup_epochs are discarded from steady-state stats.
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 80
+
+seeds: [0, 1, 2]
+loaders: [imagefolder, webdataset, datasetfs]
+
+daemon_binary: bin/fuse_daemon
