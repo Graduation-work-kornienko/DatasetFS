@@ -3,6 +3,11 @@
 Note: this loader assumes the daemon is already running and pointed at
 spec["root"]. The runner is responsible for daemon lifecycle (see
 `runner/daemon_ctl.py`) so loader setup/teardown is cheap.
+
+`decode_mode` (spec field, default "raw"):
+  - "raw"        : daemon serves raw JPEG bytes, Python decodes via PIL.
+  - "rgb_uint8"  : daemon JPEG-decodes + resizes server-side, Python skips
+                   PIL entirely and just ToTensor's the uint8 HWC buffer.
 """
 from __future__ import annotations
 
@@ -12,9 +17,10 @@ from typing import ClassVar
 from torch.utils.data import DataLoader
 
 from clients.python import DatasetFS
+from clients.python.dataset_fs import DECODE_RAW, DECODE_RGB_UINT8
 
 from .base import BaseLoader
-from ._common import bound_dfs_collate, make_image_transform
+from ._common import bound_dfs_collate, make_image_transform, make_rgb_uint8_transform
 
 
 class DatasetFSLoader(BaseLoader):
@@ -29,15 +35,28 @@ class DatasetFSLoader(BaseLoader):
         r.raise_for_status()
 
         self._daemon_url = url
-        self._transform = make_image_transform(self.image_size)
+        self._decode_mode = self.spec.get("decode_mode", DECODE_RAW)
+        if self._decode_mode not in (DECODE_RAW, DECODE_RGB_UINT8):
+            raise ValueError(
+                f"datasetfs spec.decode_mode must be one of "
+                f"{DECODE_RAW!r}/{DECODE_RGB_UINT8!r}, got {self._decode_mode!r}"
+            )
+        if self._decode_mode == DECODE_RGB_UINT8:
+            self._transform = make_rgb_uint8_transform()
+        else:
+            self._transform = make_image_transform(self.image_size)
 
     def make_loader(self) -> DataLoader:
-        ds = DatasetFS(
+        kwargs = dict(
             num_workers=self.num_workers,
             seed=self.seed,
             transform=self._transform,
             daemon_url=self._daemon_url,
         )
+        if self._decode_mode == DECODE_RGB_UINT8:
+            kwargs["decode_mode"] = DECODE_RGB_UINT8
+            kwargs["decode_image_size"] = self.image_size
+        ds = DatasetFS(**kwargs)
         return DataLoader(
             ds,
             batch_size=self.batch_size,

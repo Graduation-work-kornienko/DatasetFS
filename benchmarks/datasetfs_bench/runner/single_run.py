@@ -88,7 +88,12 @@ def _build_loader(loader_name: str, cfg: dict, label_to_idx: dict, seed: int):
     if loader_name == "webdataset":
         return cls({**common, "root": ds["webdataset"]})
     if loader_name == "datasetfs":
-        return cls({**common, "root": ds["datasetfs"]})
+        spec = {**common, "root": ds["datasetfs"]}
+        # Optional server-side decode (Phase 3 architectural optimization):
+        # daemon does JPEG decode + resize, Python skips PIL. Default is "raw".
+        if "dfs_decode_mode" in cfg:
+            spec["decode_mode"] = cfg["dfs_decode_mode"]
+        return cls(spec)
     raise ValueError(loader_name)
 
 

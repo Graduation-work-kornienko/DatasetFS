@@ -44,9 +44,20 @@ def daemon_binary(repo_root: Path) -> Path:
     binary = repo_root / "bin" / "fuse_daemon"
     binary.parent.mkdir(parents=True, exist_ok=True)
     print(f"\n[fixture] building daemon → {binary}", flush=True)
+    # Daemon needs cgo for libjpeg-turbo (see internal/pipeline/decoder_libjpeg.go).
+    # Mirror Makefile's CGO_ENV so tests build the same binary `make` would.
+    env = {
+        **os.environ,
+        "CGO_ENABLED": "1",
+        "PKG_CONFIG_PATH": (
+            "/opt/homebrew/opt/jpeg-turbo/lib/pkgconfig"
+            + (":" + os.environ["PKG_CONFIG_PATH"] if "PKG_CONFIG_PATH" in os.environ else "")
+        ),
+    }
     subprocess.run(
         ["go", "build", "-o", str(binary), "./cmd/fuse_daemon"],
         cwd=repo_root,
+        env=env,
         check=True,
     )
     return binary

@@ -16,8 +16,16 @@ import (
 )
 
 type initRequest struct {
-	NumWorkers int     `json:"num_workers"`
-	Seed       *uint64 `json:"seed,omitempty"`
+	NumWorkers int           `json:"num_workers"`
+	Seed       *uint64       `json:"seed,omitempty"`
+	Decode     *decodeOption `json:"decode,omitempty"`
+}
+
+// decodeOption mirrors pipeline.DecodeConfig over JSON. Optional; omitted
+// payload defaults to {mode: "raw"} (backwards-compatible).
+type decodeOption struct {
+	Mode      string `json:"mode"`
+	ImageSize int    `json:"image_size"`
 }
 
 type session struct {
@@ -50,6 +58,7 @@ func StartServer(coreIdx *index.CoreIndex, rootPath string) {
 	http.HandleFunc("/initialize_loading", func(w http.ResponseWriter, r *http.Request) {
 		numWorkers := 1
 		var seed *uint64
+		decodeCfg := pipeline.DecodeConfig{Mode: pipeline.DecodeRaw}
 		if body, err := io.ReadAll(r.Body); err == nil && len(body) > 0 {
 			var req initRequest
 			if jerr := json.Unmarshal(body, &req); jerr != nil {
@@ -60,6 +69,22 @@ func StartServer(coreIdx *index.CoreIndex, rootPath string) {
 				numWorkers = req.NumWorkers
 			}
 			seed = req.Seed
+			if req.Decode != nil {
+				mode := pipeline.DecodeMode(req.Decode.Mode)
+				switch mode {
+				case "", pipeline.DecodeRaw:
+					// keep default
+				case pipeline.DecodeRGBUint8:
+					if req.Decode.ImageSize <= 0 {
+						http.Error(w, "decode.image_size must be > 0 for mode=rgb_uint8", http.StatusBadRequest)
+						return
+					}
+					decodeCfg = pipeline.DecodeConfig{Mode: mode, ImageSize: req.Decode.ImageSize}
+				default:
+					http.Error(w, "unsupported decode.mode: "+req.Decode.Mode, http.StatusBadRequest)
+					return
+				}
+			}
 		}
 		if numWorkers > shm.NumSlots {
 			http.Error(w, "num_workers exceeds NumSlots (9)", http.StatusBadRequest)
@@ -92,6 +117,7 @@ func StartServer(coreIdx *index.CoreIndex, rootPath string) {
 				SlotEnd:    end,
 				PipePath:   pipeline.PipePath(wID),
 				Seed:       seed,
+				Decode:     decodeCfg,
 			}
 			p := pipeline.NewPipeline(coreIdx, strg, alloc, cfg)
 			p.Initiate()
@@ -101,7 +127,13 @@ func StartServer(coreIdx *index.CoreIndex, rootPath string) {
 		metrics.ActivePipelines.Store(int32(numWorkers))
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]int{"num_workers": numWorkers})
+		json.NewEncoder(w).Encode(map[string]any{
+			"num_workers": numWorkers,
+			"decode": map[string]any{
+				"mode":       string(decodeCfg.Mode),
+				"image_size": decodeCfg.ImageSize,
+			},
+		})
 	})
 
 	http.ListenAndServe(":51409", nil)

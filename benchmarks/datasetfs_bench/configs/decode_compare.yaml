@@ -1,0 +1,35 @@
+# A/B benchmark: client-side decode (PIL) vs server-side decode (daemon-side
+# Go JPEG + resize) for DatasetFS. The thesis hypothesis is that PIL decode is
+# the per-sample bottleneck (profiling: 83% of Python CPU was PIL on a
+# single-worker run), so offloading to the otherwise-idle daemon should net a
+# significant throughput win.
+#
+# Sweep axis: dfs_decode_mode ∈ {raw, rgb_uint8}.
+# loaders: just DatasetFS — we're only comparing modes within DFS.
+# 2 modes × 3 seeds = 6 cells. Each cell trains 1 warmup + 1 measured epoch
+# capped at 60 batches → ~5-8 min CPU total.
+
+matrix:
+  dfs_decode_mode: [raw, rgb_uint8]
+
+dataset:
+  name: imagenette
+  imagefolder: data/formats/imagenette/imagefolder
+  webdataset: data/formats/imagenette/webdataset
+  datasetfs: data/formats/imagenette/datasetfs
+
+model: resnet18
+batch_size: 64
+num_workers: 4
+image_size: 96
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 60
+
+seeds: [0, 1, 2]
+loaders: [datasetfs]
+
+drop_page_cache_between_cells: true
+
+daemon_binary: bin/fuse_daemon

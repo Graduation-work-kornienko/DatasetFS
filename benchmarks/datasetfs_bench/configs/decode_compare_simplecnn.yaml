@@ -1,0 +1,32 @@
+# Loader-bottleneck A/B: light model (SimpleCNN) so the loader, not compute,
+# gates throughput. This is where server-side decode is expected to actually
+# beat client-side, because Python's PIL was 83% of per-sample CPU
+# (profiling). With ResNet-18 (see decode_compare.yaml) compute dominates and
+# the two modes converge.
+#
+# 2 modes × 3 seeds = 6 cells × ~30 s/cell → ~3-4 min CPU.
+
+matrix:
+  dfs_decode_mode: [raw, rgb_uint8]
+
+dataset:
+  name: imagenette
+  imagefolder: data/formats/imagenette/imagefolder
+  webdataset: data/formats/imagenette/webdataset
+  datasetfs: data/formats/imagenette/datasetfs
+
+model: simplecnn
+batch_size: 64
+num_workers: 4
+image_size: 96
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 60
+
+seeds: [0, 1, 2]
+loaders: [datasetfs]
+
+drop_page_cache_between_cells: true
+
+daemon_binary: bin/fuse_daemon

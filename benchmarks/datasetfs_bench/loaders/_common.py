@@ -26,6 +26,14 @@ def make_image_transform(image_size: int) -> T.Compose:
     ])
 
 
+def make_rgb_uint8_transform() -> T.Compose:
+    """Transform for the DatasetFS server-side-decode (rgb_uint8) path: the
+    daemon already produced (H, W, 3) uint8 RGB, so just ToTensor — which
+    permutes HWC→CHW, casts to float32, and rescales to [0, 1]. Skips PIL.
+    """
+    return T.Compose([T.ToTensor()])
+
+
 # ---- collate functions ------------------------------------------------------
 
 

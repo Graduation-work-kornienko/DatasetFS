@@ -13,6 +13,35 @@ import (
 
 const SocketPort = ":51891"
 
+// DecodeMode controls whether the daemon serves raw shard bytes (legacy path)
+// or pre-decoded image tensors. Server-side decode moves JPEG decoding + resize
+// off the Python critical path — profiling shows PIL.decode + PIL.resize were
+// ~83% of per-sample Python time, while daemon CPU sat at 0.6% utilization.
+type DecodeMode string
+
+const (
+	// DecodeRaw: slot contains the raw shard bytes as read from disk; Python
+	// must decode each sample itself. Backwards-compatible default.
+	DecodeRaw DecodeMode = "raw"
+
+	// DecodeRGBUint8: daemon decodes each JPEG and resizes to
+	// (image_size, image_size, 3) uint8 HWC; Python receives ready-to-tensor
+	// bytes via the same SHM slot.
+	DecodeRGBUint8 DecodeMode = "rgb_uint8"
+)
+
+// DecodeConfig is the per-session decode policy. ImageSize is only meaningful
+// when Mode requires resize (rgb_uint8); ignored for raw.
+type DecodeConfig struct {
+	Mode      DecodeMode
+	ImageSize int
+}
+
+// IsServerSide reports whether the decoder stage must run between Loader and Dealer.
+func (d DecodeConfig) IsServerSide() bool {
+	return d.Mode == DecodeRGBUint8
+}
+
 type WorkerConfig struct {
 	WorkerID   int
 	NumWorkers int
@@ -23,6 +52,9 @@ type WorkerConfig struct {
 	// from /initialize_loading; each pipeline derives planner+dealer RNGs from
 	// it via (Seed, WorkerID) so different workers get independent streams.
 	Seed *uint64
+	// Decode is the per-session decode policy. Zero value (Mode=="") is treated
+	// as DecodeRaw by NewPipeline.
+	Decode DecodeConfig
 }
 
 // PlannerRand returns a seeded RNG for this worker's planner, or nil to use
@@ -96,14 +128,22 @@ func NewPipeline(
 		cancel:  cancel,
 	}
 
-	log.Printf("[Pipeline w=%d] Запуск фоновых воркеров Data Plane (slots [%d,%d) pipe=%s)",
-		cfg.WorkerID, cfg.SlotStart, cfg.SlotEnd, cfg.PipePath)
+	log.Printf("[Pipeline w=%d] Запуск фоновых воркеров Data Plane (slots [%d,%d) pipe=%s decode=%s)",
+		cfg.WorkerID, cfg.SlotStart, cfg.SlotEnd, cfg.PipePath, cfg.Decode.Mode)
 
 	go planner.WatchRefCounts(ctx)
-
 	go loader.Launch(ctx)
 
-	go DealerWorker(ctx, metaChan, alloc, cfg.PipePath, cfg.DealerRand())
+	// Wire the dealer's input either directly to the loader (raw mode) or
+	// through a decoder stage that rewrites the slot to packed RGB uint8.
+	dealerIn := metaChan
+	if cfg.Decode.IsServerSide() {
+		decodedChan := make(chan *SlotMeta, 100)
+		dec := NewDecoder(cfg.Decode, alloc, metaChan, decodedChan, freeSlotChan)
+		go dec.Launch(ctx)
+		dealerIn = decodedChan
+	}
+	go DealerWorker(ctx, dealerIn, alloc, cfg.PipePath, cfg.DealerRand())
 
 	return p
 }

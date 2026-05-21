@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
@@ -20,7 +21,18 @@ func main() {
 	rootPath := flag.String("root", "cmd/dataset_converter/test", "Path to DatasetFS converted dataset (manifest + shards)")
 	mountPoint := flag.String("mount", "./dataset_mount", "FUSE mount point (ignored with --no-mount)")
 	noMount := flag.Bool("no-mount", false, "Skip FUSE mount (run IPC + pipeline only). Useful for tests / non-FUSE hosts")
+	mutexProfileRate := flag.Int("mutex-profile-rate", 0, "If >0, enables /debug/pprof/mutex with 1-in-N sampling. Adds ~1-3% overhead.")
+	blockProfileRate := flag.Int("block-profile-rate", 0, "If >0, enables /debug/pprof/block with rate in ns. 1 means every blocking event.")
 	flag.Parse()
+
+	if *mutexProfileRate > 0 {
+		runtime.SetMutexProfileFraction(*mutexProfileRate)
+		log.Printf("[pprof] mutex profile enabled, fraction=1/%d", *mutexProfileRate)
+	}
+	if *blockProfileRate > 0 {
+		runtime.SetBlockProfileRate(*blockProfileRate)
+		log.Printf("[pprof] block profile enabled, rate=%d ns", *blockProfileRate)
+	}
 
 	mnfst := index.NewManifest(*rootPath)
 	mnfst.Load()
