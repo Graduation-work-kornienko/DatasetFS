@@ -26,13 +26,13 @@ func TestWAL_OpenAppendsToExistingFile(t *testing.T) {
 	dir := t.TempDir()
 
 	// First open + write something.
-	w1, err := OpenWAL(dir)
+	w1, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	require.NoError(t, w1.LogDelete("first.jpg"))
 	require.NoError(t, w1.Close())
 
 	// Reopen — must append, not truncate.
-	w2, err := OpenWAL(dir)
+	w2, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	require.NoError(t, w2.LogDelete("second.jpg"))
 	require.NoError(t, w2.Close())
@@ -46,7 +46,7 @@ func TestWAL_OpenAppendsToExistingFile(t *testing.T) {
 func TestWAL_LogAddRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 
-	w, err := OpenWAL(dir)
+	w, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	defer w.Close()
 
@@ -70,7 +70,7 @@ func TestWAL_LogAddRoundTrip(t *testing.T) {
 
 func TestWAL_LogDeleteAndShard(t *testing.T) {
 	dir := t.TempDir()
-	w, err := OpenWAL(dir)
+	w, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	defer w.Close()
 
@@ -91,7 +91,7 @@ func TestWAL_LogDeleteAndShard(t *testing.T) {
 
 func TestWAL_ReplayEmpty(t *testing.T) {
 	dir := t.TempDir()
-	w, err := OpenWAL(dir)
+	w, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	defer w.Close()
 
@@ -104,7 +104,7 @@ func TestWAL_ReplayEmpty(t *testing.T) {
 func TestWAL_ReplayAppliesAdd(t *testing.T) {
 	dir := t.TempDir()
 
-	w1, err := OpenWAL(dir)
+	w1, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	require.NoError(t, w1.LogAdd(&Metadata{
 		ShardID: -1, Offset: 512, Size: 1024, Path: "new.jpg",
@@ -112,7 +112,7 @@ func TestWAL_ReplayAppliesAdd(t *testing.T) {
 	require.NoError(t, w1.Close())
 
 	// Simulate a crash + restart: open WAL, replay into a fresh CoreIndex.
-	w2, err := OpenWAL(dir)
+	w2, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	defer w2.Close()
 
@@ -138,7 +138,7 @@ func TestWAL_ReplayAppliesDelete(t *testing.T) {
 	idx.FileMap["doomed.jpg"] = idx.ShardMap[0].Objects[0]
 
 	// WAL had a delete that the previous run never checkpointed.
-	w, err := OpenWAL(dir)
+	w, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	require.NoError(t, w.LogDelete("doomed.jpg"))
 
@@ -154,7 +154,7 @@ func TestWAL_ReplayPreservesOrder(t *testing.T) {
 	// applied in reverse order, file would still be live.
 	dir := t.TempDir()
 
-	w, err := OpenWAL(dir)
+	w, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	require.NoError(t, w.LogAdd(&Metadata{
 		ShardID: -1, Offset: 512, Size: 100, Path: "x.jpg",
@@ -172,7 +172,7 @@ func TestWAL_ReplayPreservesOrder(t *testing.T) {
 func TestWAL_TruncateClearsFile(t *testing.T) {
 	dir := t.TempDir()
 
-	w, err := OpenWAL(dir)
+	w, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	require.NoError(t, w.LogDelete("a.jpg"))
 	require.NoError(t, w.LogDelete("b.jpg"))
@@ -198,7 +198,7 @@ func TestWAL_ReplayThenAppendStillFsyncs(t *testing.T) {
 	// be at EOF so subsequent appends don't overwrite existing records.
 	dir := t.TempDir()
 
-	w, err := OpenWAL(dir)
+	w, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	require.NoError(t, w.LogDelete("first.jpg"))
 
@@ -223,7 +223,7 @@ func TestWAL_MalformedEntryAborts(t *testing.T) {
 		[]byte(`{"op":"delete","ts":1,"delete":"a.jpg"}`+"\n"+`{not json}`+"\n"),
 		0644))
 
-	w, err := OpenWAL(dir)
+	w, err := OpenWALWithFormat(dir, "json")
 	require.NoError(t, err)
 	defer w.Close()
 

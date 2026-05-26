@@ -17,13 +17,13 @@ type MutationManager struct {
 	mu        *sync.Mutex      // Гарантирует, что мы пишем дельты по очереди
 	coreIndex *index.CoreIndex // Указатель на in-memory мозг
 	manifest  *index.Manifest  // manifest File
-	walWriter *index.WAL       // Указатель на текстовый лог (append-only)
+	walWriter index.WAL        // Interface for WAL operations
 	storage   *storage.Storage
 
 	lastShard *int // Number of last shard
 }
 
-func NewMutationManager(idx *index.CoreIndex, m *index.Manifest, wal *index.WAL, tar *storage.Storage) *MutationManager {
+func NewMutationManager(idx *index.CoreIndex, m *index.Manifest, wal index.WAL, tar *storage.Storage) *MutationManager {
 	var lastShard int = 0
 	deltaShardID := -1
 	idx.Mu.Lock()

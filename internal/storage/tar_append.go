@@ -15,12 +15,14 @@ const (
 )
 
 type Storage struct {
-	Root string // Root of dataset
+	Root          string         // Root of dataset
+	RemoteStorage *RemoteStorage // Optional remote storage handler
 }
 
-func New(root string) *Storage {
+func New(root string, remoteStorage *RemoteStorage) *Storage {
 	return &Storage{
-		Root: root,
+		Root:          root,
+		RemoteStorage: remoteStorage,
 	}
 }
 

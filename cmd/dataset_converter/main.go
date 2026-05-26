@@ -10,6 +10,9 @@ import (
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/storage"
 
 	"github.com/spf13/cobra"
+
+	// Import the parquet package to ensure it's included in the build
+	_ "github.com/parquet-go/parquet-go"
 )
 
 var (
@@ -33,6 +36,13 @@ var (
 		RunE:  generateConvertCommand(ParseWebDataset),
 	}
 
+	convertManifest = &cobra.Command{
+		Use:   "convert-manifest",
+		Short: "Convert a JSON manifest to Parquet format",
+		Long:  "Convert an existing JSON manifest to Parquet format for improved efficiency",
+		RunE:  convertManifestCmd,
+	}
+
 	sourceDir string
 	targetDir string
 )
@@ -42,8 +52,14 @@ func init() {
 	datasetFolder.Flags().StringVarP(&targetDir, "target", "t", "", "Target directory for the DatasetFS output")
 	datasetFolder.MarkFlagRequired("source")
 	datasetFolder.MarkFlagRequired("target")
+
+	// Add flags for convert-manifest command
+	convertManifest.Flags().StringP("source", "s", "", "Source directory containing the JSON manifest to convert")
+	convertManifest.MarkFlagRequired("source")
+
 	rootCmd.AddCommand(datasetFolder)
 	rootCmd.AddCommand(webDataset)
+	rootCmd.AddCommand(convertManifest)
 }
 
 type parseFunc func(context.Context, *manager.MutationManager, string) error
@@ -56,8 +72,11 @@ func generateConvertCommand(f parseFunc) func(*cobra.Command, []string) error {
 
 		coreIndex := index.NewIndex()
 		manifest := index.NewManifest(targetDir)
-		wal := &index.WAL{}
-		storage := storage.New(targetDir)
+		wal, err := index.OpenWAL(targetDir)
+		if err != nil {
+			return fmt.Errorf("failed to create WAL: %w", err)
+		}
+		storage := storage.New(targetDir, nil)
 
 		ctx := context.Background()
 		mutationManager := manager.NewMutationManager(coreIndex, manifest, wal, storage)

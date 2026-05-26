@@ -7,47 +7,17 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
-// WAL = write-ahead log for mutations against the in-memory CoreIndex.
-//
-// Problem it solves: mutations (AddDeltaFile, DeleteFile, AppendShard) update
-// the in-memory CoreIndex immediately, but the on-disk manifest is rewritten
-// only at Shutdown. If the daemon crashes between mutation and shutdown, all
-// mutations since the last manifest save are lost.
-//
-// Contract:
-//   - Mutation operations call LogXxx BEFORE updating CoreIndex. Each LogXxx
-//     does an O_APPEND write + fsync to /<root>/wal.log.
-//   - On daemon startup: load manifest → LoadCoreIndex → OpenWAL → Replay onto
-//     CoreIndex. The result is the same in-memory state the daemon had when
-//     it crashed.
-//   - On clean Shutdown: write manifest, THEN Truncate WAL. The order matters:
-//     truncating before the manifest is durable would lose the very mutations
-//     we just persisted.
-//
-// Failure modes (documented, not yet auto-recovered):
-//   - Crash AFTER tar.Write but BEFORE LogAdd → tar has orphan bytes, index
-//     has nothing. Harmless for index integrity; tar accumulates dead bytes
-//     until a future vacuum pass.
-//   - Crash AFTER LogAdd but BEFORE CoreIndex.AddFile → WAL replay applies
-//     it; bytes are already in tar; index becomes consistent.
-//   - Crash AFTER CoreIndex.AddFile but before client ack → client may retry
-//     and produce a duplicate WAL entry. Replay handles "shard not found"
-//     gracefully but does NOT dedupe by path. Idempotency is a known gap.
-//
-// Format: one JSON object per line. Each line is one of:
-//   {"op":"add","ts":...,"add":{<Metadata>}}
-//   {"op":"delete","ts":...,"delete":"<path>"}
-//   {"op":"shard","ts":...,"shard":{<Shard with embedded Objects>}}
-//
-// Not (yet) implemented: log rotation, segment files, CRC per record,
-// concurrent-process file locking. Reasonable for a graduation-thesis
-// single-instance daemon; would need hardening for multi-instance prod.
-
-const walFileName = "wal.log"
+// WAL format constants
+const (
+	walFileName     = "wal.log"
+	walFormatJSON   = "json"
+	walFormatBinary = "binary"
+)
 
 // WALOp identifies the kind of mutation in a WAL record.
 type WALOp string
@@ -68,29 +38,106 @@ type WALEntry struct {
 	Shard     *Shard    `json:"shard,omitempty"`
 }
 
-type WAL struct {
+// WAL is the interface for write-ahead log operations.
+// Both JSONWAL and BinaryWAL implement this interface.
+type WAL interface {
+	// Path returns the absolute path of the WAL file. Useful for diagnostics.
+	Path() string
+
+	// LogAdd records an AddFile mutation. Caller MUST call this before
+	// CoreIndex.AddFile so a crash between them is replay-recoverable.
+	LogAdd(meta *Metadata) error
+
+	// LogDelete records a tombstone mutation.
+	LogDelete(path string) error
+
+	// LogAppendShard records an entire shard's metadata (including its Objects).
+	// Used by dataset-init paths that bulk-append shards.
+	LogAppendShard(shard *Shard) error
+
+	// Replay reads the WAL from start to EOF and applies every record to idx.
+	// On parse error or apply failure it returns immediately — the daemon must
+	// surface the problem rather than silently continue with a stale CoreIndex.
+	// Restores the file position to EOF on exit so subsequent LogXxx calls keep
+	// appending.
+	Replay(idx *CoreIndex) (applied int, err error)
+
+	// Truncate empties the WAL. Call ONLY after the manifest has been durably
+	// stored — truncating before that would lose the very mutations the manifest
+	// was supposed to capture.
+	Truncate() error
+
+	// Close flushes and releases the WAL file descriptor.
+	Close() error
+}
+
+// JSONWAL is the JSON-based WAL implementation.
+type JSONWAL struct {
 	mu   sync.Mutex
 	file *os.File
 	path string
 }
 
-// OpenWAL opens (or creates) the WAL file at <root>/wal.log in append+rw mode.
+// openWAL opens (or creates) the WAL file at <root>/wal.log in append+rw mode.
 // The file is positioned at end (O_APPEND); Replay seeks to start, then back.
-func OpenWAL(root string) (*WAL, error) {
+// The format parameter specifies the WAL format to use ("json" or "binary").
+// If format is empty, defaults to "json".
+func openWAL(root, format string) (WAL, error) {
+	// Default to JSON format if not specified
+	if format == "" {
+		format = walFormatJSON
+	}
+
 	path := filepath.Join(root, walFileName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open wal %s: %w", path, err)
 	}
-	return &WAL{file: f, path: path}, nil
+
+	// Create appropriate WAL implementation based on format
+	switch strings.ToLower(format) {
+	case walFormatJSON:
+		wal := &JSONWAL{file: f, path: path}
+		return wal, nil
+	case walFormatBinary:
+		// For binary format, we need to check if the file is empty or has the correct header
+		info, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return nil, fmt.Errorf("stat wal file: %w", err)
+		}
+
+		// If file is empty, create new binary WAL
+		if info.Size() == 0 {
+			return NewBinaryWAL(f)
+		}
+
+		// If file exists, open for reading and verify header
+		return OpenBinaryWAL(f)
+	default:
+		f.Close()
+		return nil, fmt.Errorf("unsupported WAL format: %s", format)
+	}
+}
+
+// OpenWAL opens (or creates) the WAL file at <root>/wal.log in append+rw mode.
+// This is a compatibility wrapper that uses the JSON format.
+// Deprecated: Use OpenWALWithFormat instead.
+func OpenWAL(root string) (WAL, error) {
+	return openWAL(root, walFormatJSON)
+}
+
+// OpenWALWithFormat opens (or creates) the WAL file with the specified format.
+func OpenWALWithFormat(root, format string) (WAL, error) {
+	return openWAL(root, format)
 }
 
 // Path returns the absolute path of the WAL file. Useful for diagnostics.
-func (w *WAL) Path() string { return w.path }
+func (w *JSONWAL) Path() string { return w.path }
 
 // writeEntry serializes and fsyncs one record. Holds the mutex for the whole
 // op so concurrent mutators see WAL records in the order they were submitted.
-func (w *WAL) writeEntry(e *WALEntry) error {
+func (w *JSONWAL) writeEntry(e *WALEntry) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -119,7 +166,7 @@ func (w *WAL) writeEntry(e *WALEntry) error {
 
 // LogAdd records an AddFile mutation. Caller MUST call this before
 // CoreIndex.AddFile so a crash between them is replay-recoverable.
-func (w *WAL) LogAdd(meta *Metadata) error {
+func (w *JSONWAL) LogAdd(meta *Metadata) error {
 	if meta == nil {
 		return fmt.Errorf("LogAdd: meta is nil")
 	}
@@ -127,7 +174,7 @@ func (w *WAL) LogAdd(meta *Metadata) error {
 }
 
 // LogDelete records a tombstone mutation.
-func (w *WAL) LogDelete(path string) error {
+func (w *JSONWAL) LogDelete(path string) error {
 	if path == "" {
 		return fmt.Errorf("LogDelete: empty path")
 	}
@@ -136,7 +183,7 @@ func (w *WAL) LogDelete(path string) error {
 
 // LogAppendShard records an entire shard's metadata (including its Objects).
 // Used by dataset-init paths that bulk-append shards.
-func (w *WAL) LogAppendShard(shard *Shard) error {
+func (w *JSONWAL) LogAppendShard(shard *Shard) error {
 	if shard == nil {
 		return fmt.Errorf("LogAppendShard: shard is nil")
 	}
@@ -146,10 +193,9 @@ func (w *WAL) LogAppendShard(shard *Shard) error {
 // Replay reads the WAL from start to EOF and applies every record to idx.
 // On parse error or apply failure it returns immediately — the daemon must
 // surface the problem rather than silently continue with a stale CoreIndex.
-//
 // Restores the file position to EOF on exit so subsequent LogXxx calls keep
 // appending.
-func (w *WAL) Replay(idx *CoreIndex) (applied int, err error) {
+func (w *JSONWAL) Replay(idx *CoreIndex) (applied int, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -214,7 +260,7 @@ func applyEntry(e *WALEntry, idx *CoreIndex) error {
 // Truncate empties the WAL. Call ONLY after the manifest has been durably
 // stored — truncating before that would lose the very mutations the manifest
 // was supposed to capture.
-func (w *WAL) Truncate() error {
+func (w *JSONWAL) Truncate() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -232,7 +278,7 @@ func (w *WAL) Truncate() error {
 }
 
 // Close flushes and releases the WAL file descriptor.
-func (w *WAL) Close() error {
+func (w *JSONWAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.file == nil {

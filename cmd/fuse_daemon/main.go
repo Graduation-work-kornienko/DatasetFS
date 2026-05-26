@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -23,6 +24,7 @@ func main() {
 	noMount := flag.Bool("no-mount", false, "Skip FUSE mount (run IPC + pipeline only). Useful for tests / non-FUSE hosts")
 	mutexProfileRate := flag.Int("mutex-profile-rate", 0, "If >0, enables /debug/pprof/mutex with 1-in-N sampling. Adds ~1-3% overhead.")
 	blockProfileRate := flag.Int("block-profile-rate", 0, "If >0, enables /debug/pprof/block with rate in ns. 1 means every blocking event.")
+	cacheDir := flag.String("cache-dir", "./dataset_cache", "Directory for caching remote datasets")
 	flag.Parse()
 
 	if *mutexProfileRate > 0 {
@@ -34,19 +36,40 @@ func main() {
 		log.Printf("[pprof] block profile enabled, rate=%d ns", *blockProfileRate)
 	}
 
-	mnfst := index.NewManifest(*rootPath)
-	mnfst.Load()
+	// Create remote storage if needed
+	var remoteStorage *storage.RemoteStorage
+	if storage.IsURL(*rootPath) {
+		remoteStorage = storage.NewRemoteStorage(*cacheDir)
+	}
+
+	// Get local path for the root (download if remote)
+	var localRoot string
+	var err error
+	if remoteStorage != nil {
+		localRoot, err = remoteStorage.GetLocalPath(context.Background(), *rootPath)
+		if err != nil {
+			log.Fatalf("Failed to download remote dataset: %v", err)
+		}
+	} else {
+		localRoot = *rootPath
+	}
+
+	mnfst := index.NewManifest(localRoot)
+	err = mnfst.Load(remoteStorage)
+	if err != nil {
+		log.Fatalf("Failed to load manifest: %v", err)
+	}
 	coreIdx, err := mnfst.LoadCoreIndex()
 	if err != nil {
 		log.Fatalf("load core index fail: %v\n", err)
 	}
 	log.Println("Loaded")
 
-	strg := &storage.Storage{Root: *rootPath}
+	strg := storage.New(localRoot, remoteStorage)
 
 	// Open WAL early so MutationManager can write to it, and so Replay below
 	// recovers any mutations that happened since the last manifest checkpoint.
-	wal, err := index.OpenWAL(*rootPath)
+	wal, err := index.OpenWALWithFormat(*rootPath, "json")
 	if err != nil {
 		log.Fatalf("open WAL: %v", err)
 	}

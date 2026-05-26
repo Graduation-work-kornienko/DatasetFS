@@ -25,8 +25,9 @@ func TestWebdataset(t *testing.T) {
 
 	coreIndex := index.NewIndex()
 	manifest := index.NewManifest(targetDir)
-	wal := &index.WAL{}
-	storage := storage.New(targetDir)
+	wal, err := index.OpenWAL(targetDir)
+	require.NoError(t, err)
+	storage := storage.New(targetDir, nil)
 
 	ctx := context.Background()
 	mutationManager := manager.NewMutationManager(coreIndex, manifest, wal, storage)
@@ -40,7 +41,7 @@ func TestWebdataset(t *testing.T) {
 
 	mnfst := index.NewManifest(targetDir)
 
-	err = mnfst.Load()
+	err = mnfst.Load(nil)
 	require.NoError(t, err)
 	coreIdx, err := mnfst.LoadCoreIndex()
 	// Запускаем твой новый модуль
