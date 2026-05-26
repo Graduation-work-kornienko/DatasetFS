@@ -44,9 +44,24 @@ func main() {
 
 	strg := &storage.Storage{Root: *rootPath}
 
+	// Open WAL early so MutationManager can write to it, and so Replay below
+	// recovers any mutations that happened since the last manifest checkpoint.
+	wal, err := index.OpenWAL(*rootPath)
+	if err != nil {
+		log.Fatalf("open WAL: %v", err)
+	}
+
 	go ipc.StartServer(coreIdx, *rootPath)
 
-	mutMgr := manager.NewMutationManager(coreIdx, mnfst, nil, strg)
+	mutMgr := manager.NewMutationManager(coreIdx, mnfst, wal, strg)
+
+	// Replay AFTER NewMutationManager so the delta shard placeholder (id=-1)
+	// is in coreIdx — replay's AddFile entries reference it.
+	if applied, err := wal.Replay(coreIdx); err != nil {
+		log.Fatalf("WAL replay failed: %v (recover by inspecting/deleting %s)", err, wal.Path())
+	} else if applied > 0 {
+		log.Printf("WAL: replayed %d mutation(s) since last checkpoint", applied)
+	}
 
 	if *noMount {
 		log.Println("Running without FUSE mount (--no-mount)")
@@ -55,6 +70,9 @@ func main() {
 		<-c
 		log.Println("Saving manifest")
 		mutMgr.Shutdown()
+		if cerr := wal.Close(); cerr != nil {
+			log.Printf("wal.Close: %v", cerr)
+		}
 		log.Println("Daemon stopped")
 		return
 	}
@@ -101,5 +119,8 @@ func main() {
 
 	log.Println("Saving manifest")
 	mutMgr.Shutdown()
+	if cerr := wal.Close(); cerr != nil {
+		log.Printf("wal.Close: %v", cerr)
+	}
 	log.Println("Daemon stopped")
 }

@@ -52,16 +52,25 @@ func NewMutationManager(idx *index.CoreIndex, m *index.Manifest, wal *index.WAL,
 	}
 }
 
-// DeleteFile обрабатывает FUSE вызов `rm`
+// DeleteFile обрабатывает FUSE вызов `rm`.
+//
+// Order matters: WAL fsync goes first, then in-memory mutation. If we crash
+// between them, replay sees the WAL entry and re-marks the file deleted.
+// If we crashed in the opposite order, the in-memory delete would happen but
+// not survive the next manifest checkpoint — silent loss.
 func (m *MutationManager) DeleteFile(filename string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.walWriter != nil {
+		if err := m.walWriter.LogDelete(filename); err != nil {
+			return fmt.Errorf("wal LogDelete %q: %w", filename, err)
+		}
+	}
+
 	if err := m.coreIndex.MarkDeleted(filename); err != nil {
 		return err
 	}
-
-	// m.walWriter.LogDelete(filename)
 
 	return nil
 }
@@ -122,11 +131,19 @@ func (m *MutationManager) AddDeltaFile(logicalName string, tmpFilePath string) e
 		Deleted: false,
 	}
 
+	// WAL before in-memory: a crash between tw.Close() and LogAdd leaves
+	// orphan bytes in the delta tar but a consistent index. A crash between
+	// LogAdd and AddFile leaves a WAL entry that replay re-applies →
+	// consistent. Reverse order would lose the mutation on crash.
+	if m.walWriter != nil {
+		if err := m.walWriter.LogAdd(meta); err != nil {
+			return fmt.Errorf("wal LogAdd %q: %w", logicalName, err)
+		}
+	}
+
 	if err := m.coreIndex.AddFile(meta); err != nil {
 		return err
 	}
-
-	// m.walWriter.LogAdd(meta)
 
 	return nil
 }
@@ -144,7 +161,14 @@ func (m *MutationManager) AppendShard(shard *index.Shard) error {
 		return fmt.Errorf("tarAppender.AppendShard: %w", err)
 	}
 
-	// 2. Append to CoreIndex
+	// 2. WAL before in-memory: see DeleteFile/AddDeltaFile rationale.
+	if m.walWriter != nil {
+		if err := m.walWriter.LogAppendShard(shard); err != nil {
+			return fmt.Errorf("wal LogAppendShard %d: %w", shard.Number, err)
+		}
+	}
+
+	// 3. Append to CoreIndex
 	if err := m.coreIndex.AppendShard(shard); err != nil {
 		return fmt.Errorf("coreIndex.AppendShard: %w", err)
 	}
@@ -198,11 +222,24 @@ func (m *MutationManager) AppendWebDatasetShards(ctx context.Context, tarPaths [
 	return nil
 }
 
+// Shutdown checkpoints the manifest and, on success, truncates the WAL.
+// Truncate order matters: WAL must outlive the manifest write — if we lose
+// power between the two, replay still recovers from the (now-redundant) WAL.
+// If we truncated first, a crash before Manifest.Store would lose every
+// mutation since the previous checkpoint.
 func (m *MutationManager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// TODO - decide, where to restore from wal log
+
 	manifest := m.coreIndex.Manifest()
 	manifest.Root = m.storage.Root
-	manifest.Store()
+	if err := manifest.Store(); err != nil {
+		fmt.Printf("[MutationManager] Shutdown: manifest.Store failed: %v — WAL preserved\n", err)
+		return
+	}
+	if m.walWriter != nil {
+		if err := m.walWriter.Truncate(); err != nil {
+			fmt.Printf("[MutationManager] Shutdown: wal.Truncate failed: %v\n", err)
+		}
+	}
 }
