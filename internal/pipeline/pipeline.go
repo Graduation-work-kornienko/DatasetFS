@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
+	"runtime"
+	"sync"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/shm"
@@ -35,6 +37,11 @@ const (
 type DecodeConfig struct {
 	Mode      DecodeMode
 	ImageSize int
+	// Parallelism is the number of decode worker goroutines per pipeline.
+	// 0 = auto (resolved in NewPipeline to max(1, NumCPU/NumWorkers) so the
+	// total decode goroutines across all pipelines does not oversubscribe
+	// cores). Only meaningful for server-side decode modes.
+	Parallelism int
 }
 
 // IsServerSide reports whether the decoder stage must run between Loader and Dealer.
@@ -95,6 +102,24 @@ func PipePath(workerID int) string {
 	return fmt.Sprintf("/tmp/datasetfs_pipe_%d", workerID)
 }
 
+// resolveParallelism picks the decode worker count per pipeline. An explicit
+// requested value (>0) wins. Otherwise auto = NumCPU/numWorkers (floored at 1),
+// so the total decode goroutines across all pipelines (numWorkers*K) stays
+// near the core count rather than oversubscribing.
+func resolveParallelism(requested, numWorkers int) int {
+	if requested > 0 {
+		return requested
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	k := runtime.NumCPU() / numWorkers
+	if k < 1 {
+		k = 1
+	}
+	return k
+}
+
 type Pipeline struct {
 	cfg     WorkerConfig
 	planner *Planner
@@ -102,6 +127,10 @@ type Pipeline struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	// wg tracks every goroutine that touches shared memory (loader, decoder,
+	// planner, dealer + the planner's scheduling goroutine). Stop() waits on it
+	// so the allocator is never unmapped while a stage still references a slot.
+	wg sync.WaitGroup
 }
 
 func NewPipeline(
@@ -131,29 +160,45 @@ func NewPipeline(
 	log.Printf("[Pipeline w=%d] Запуск фоновых воркеров Data Plane (slots [%d,%d) pipe=%s decode=%s)",
 		cfg.WorkerID, cfg.SlotStart, cfg.SlotEnd, cfg.PipePath, cfg.Decode.Mode)
 
-	go planner.WatchRefCounts(ctx)
-	go loader.Launch(ctx)
+	p.goTracked(func() { planner.WatchRefCounts(ctx) })
+	p.goTracked(func() { loader.Launch(ctx) })
 
 	// Wire the dealer's input either directly to the loader (raw mode) or
 	// through a decoder stage that rewrites the slot to packed RGB uint8.
 	dealerIn := metaChan
 	if cfg.Decode.IsServerSide() {
+		k := resolveParallelism(cfg.Decode.Parallelism, cfg.NumWorkers)
+		log.Printf("[Pipeline w=%d] decode parallelism = %d", cfg.WorkerID, k)
 		decodedChan := make(chan *SlotMeta, 100)
-		dec := NewDecoder(cfg.Decode, alloc, metaChan, decodedChan, freeSlotChan)
-		go dec.Launch(ctx)
+		dec := NewDecoder(cfg.Decode, alloc, metaChan, decodedChan, freeSlotChan, k)
+		p.goTracked(func() { dec.Launch(ctx) })
 		dealerIn = decodedChan
 	}
-	go DealerWorker(ctx, dealerIn, alloc, cfg.PipePath, cfg.DealerRand())
+	p.goTracked(func() { DealerWorker(ctx, dealerIn, alloc, cfg.PipePath, cfg.DealerRand()) })
 
 	return p
 }
 
-func (p *Pipeline) Initiate() error {
-	log.Printf("[Pipeline w=%d] Получен сигнал Initiate! Запуск эпохи...", p.cfg.WorkerID)
-	return p.planner.Initiate(p.ctx)
+// goTracked runs fn in a goroutine counted by p.wg so Stop() can join it.
+func (p *Pipeline) goTracked(fn func()) {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		fn()
+	}()
 }
 
+func (p *Pipeline) Initiate() error {
+	log.Printf("[Pipeline w=%d] Получен сигнал Initiate! Запуск эпохи...", p.cfg.WorkerID)
+	return p.planner.Initiate(p.ctx, &p.wg)
+}
+
+// Stop cancels the pipeline and BLOCKS until all its goroutines have exited.
+// Callers (session teardown) rely on this so the shared-memory allocator is
+// only unmapped after every stage has stopped touching it — otherwise an
+// in-flight decode/load would read or write freed memory (SIGSEGV).
 func (p *Pipeline) Stop() {
 	log.Printf("[Pipeline w=%d] Остановка конвейера...", p.cfg.WorkerID)
 	p.cancel()
+	p.wg.Wait()
 }

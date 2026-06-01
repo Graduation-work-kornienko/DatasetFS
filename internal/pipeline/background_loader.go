@@ -94,14 +94,22 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 			log.Printf("[Loader] Загружен Слот %d , шард %d файлов %d (Валидных файлов: %d). Передаю Dealer.", job.SlotID, job.ShardID, len(job.Shard.Objects), len(validMeta))
 
 			if len(validMeta) == 0 {
-				b.freeSlotChan <- job.SlotID
+				select {
+				case b.freeSlotChan <- job.SlotID:
+				case <-ctx.Done():
+					return
+				}
 				continue
 			}
 			log.Printf("[Loader] ✅ Загружен Слот %d (Валидных файлов: %d). Передаю Dealer.", job.SlotID, len(validMeta))
 
-			b.metadataChan <- &SlotMeta{
-				Objects: validMeta,
-				SlotID:  job.SlotID,
+			// ctx-guarded: on session teardown the downstream stage may have
+			// stopped draining; we must not block here or Stop() would hang and
+			// the allocator could be unmapped while we still reference the slot.
+			select {
+			case b.metadataChan <- &SlotMeta{Objects: validMeta, SlotID: job.SlotID}:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}

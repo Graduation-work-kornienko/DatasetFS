@@ -93,6 +93,10 @@ def _build_loader(loader_name: str, cfg: dict, label_to_idx: dict, seed: int):
         # daemon does JPEG decode + resize, Python skips PIL. Default is "raw".
         if "dfs_decode_mode" in cfg:
             spec["decode_mode"] = cfg["dfs_decode_mode"]
+        # Optional decode parallelism (opt 02): daemon decode worker goroutines
+        # per pipeline. 0/absent = auto (NumCPU/num_workers).
+        if "dfs_decode_parallelism" in cfg:
+            spec["decode_parallelism"] = cfg["dfs_decode_parallelism"]
         return cls(spec)
     raise ValueError(loader_name)
 

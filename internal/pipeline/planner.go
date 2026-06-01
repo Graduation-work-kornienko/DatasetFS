@@ -5,12 +5,19 @@ import (
 	"log"
 	"math/rand/v2"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/metrics"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/shm"
 )
+
+// refCountPollInterval is how often WatchRefCounts scans SHM refcounts for
+// slots freed by the consumer. Kept tight (was 100 ms in Phase 3): each scan
+// is a handful of atomic loads, and the interval is a hard floor on slot-reuse
+// latency on the critical path. See opt 02.
+const refCountPollInterval = 2 * time.Millisecond
 
 type Planner struct {
 	cfg          WorkerConfig
@@ -67,12 +74,14 @@ func (p *Planner) shardsForWorker() []int {
 	return mine
 }
 
-func (p *Planner) Initiate(ctx context.Context) error {
+func (p *Planner) Initiate(ctx context.Context, wg *sync.WaitGroup) error {
 	shards := p.coreIndex.AllShards()
 	myShardIDs := p.shardsForWorker()
 	log.Printf("[Planner w=%d] %d shards assigned", p.cfg.WorkerID, len(myShardIDs))
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		// Closing loaderChan signals BackgroundLoader that no more jobs are
 		// coming, which lets it close metadataChan, which lets DealerWorker
 		// drain its window and emit the end-of-epoch batch.
@@ -122,8 +131,11 @@ func (p *Planner) WatchRefCounts(ctx context.Context) {
 
 	// Poll fast — slot reuse is on the critical path. When Python decrements
 	// a refcount to 0, we want to surface a free slot back to the planner
-	// quickly so the next shard can load.
-	ticker := time.NewTicker(100 * time.Millisecond)
+	// quickly so the next shard can load. ReadRefCount is an atomic load over
+	// ≤9 SHM ints, so a tight interval costs negligible CPU; the old 100 ms
+	// tick added up to 100 ms of slot-recycle latency per cycle, which starved
+	// the consumer (especially with few slots/worker). See opt 02.
+	ticker := time.NewTicker(refCountPollInterval)
 	defer ticker.Stop()
 
 	for {

@@ -148,12 +148,22 @@ def _run_iteration(
     batch_size: int,
     image_size: int,
     max_batches: int,
+    decode_mode: str = "raw",
 ) -> tuple[int, float]:
     """Iterate the DataLoader for `max_batches`, returning (samples, elapsed_s)."""
-    ds = DatasetFS(
-        num_workers=num_workers, seed=0,
-        transform=_build_transform(image_size),
-    )
+    if decode_mode == "rgb_uint8":
+        # Daemon already decoded+resized to (image_size, image_size, 3) uint8.
+        # Client transform is just ToTensor — no PIL on the per-sample path.
+        ds = DatasetFS(
+            num_workers=num_workers, seed=0,
+            transform=T.ToTensor(),
+            decode_mode="rgb_uint8", decode_image_size=image_size,
+        )
+    else:
+        ds = DatasetFS(
+            num_workers=num_workers, seed=0,
+            transform=_build_transform(image_size),
+        )
     loader = DataLoader(
         ds,
         batch_size=batch_size,
@@ -180,6 +190,9 @@ def main() -> int:
                         help="Cap iteration at this many batches.")
     parser.add_argument("--cpu-seconds", type=int, default=25,
                         help="Length of the CPU pprof window (s).")
+    parser.add_argument("--decode-mode", default="raw",
+                        choices=["raw", "rgb_uint8"],
+                        help="raw = client PIL decode; rgb_uint8 = daemon decode.")
     parser.add_argument("--dataset",
                         default="data/formats/imagenette/datasetfs")
     parser.add_argument("--imagefolder-root",
@@ -235,6 +248,7 @@ def main() -> int:
                 batch_size=args.batch_size,
                 image_size=args.image_size,
                 max_batches=args.batches,
+                decode_mode=args.decode_mode,
             )
         finally:
             py_profile.disable()

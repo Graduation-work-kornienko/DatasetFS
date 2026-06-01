@@ -65,6 +65,21 @@ func DealerWorker(
 	defer pipeFile.Close()
 	encoder := json.NewEncoder(pipeFile)
 
+	// On session teardown a consumer that stopped early (e.g. training capped
+	// at max_batches) leaves us blocked in encoder.Encode on a full pipe.
+	// Closing the pipe on ctx cancellation unblocks that write so this worker
+	// returns promptly — required so the allocator is not unmapped while we
+	// (or upstream stages joined with us) still touch shared memory.
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			pipeFile.Close()
+		case <-stopWatch:
+		}
+	}()
+
 	for {
 		var shadowPool []*Metadata
 		isEOF := false

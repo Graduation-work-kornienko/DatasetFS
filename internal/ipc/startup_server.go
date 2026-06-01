@@ -26,6 +26,8 @@ type initRequest struct {
 type decodeOption struct {
 	Mode      string `json:"mode"`
 	ImageSize int    `json:"image_size"`
+	// Parallelism: decode worker goroutines per pipeline. 0/omitted = auto.
+	Parallelism int `json:"parallelism,omitempty"`
 }
 
 type session struct {
@@ -104,7 +106,11 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 						http.Error(w, "decode.image_size must be > 0 for mode=rgb_uint8", http.StatusBadRequest)
 						return
 					}
-					decodeCfg = pipeline.DecodeConfig{Mode: mode, ImageSize: req.Decode.ImageSize}
+					decodeCfg = pipeline.DecodeConfig{
+						Mode:        mode,
+						ImageSize:   req.Decode.ImageSize,
+						Parallelism: req.Decode.Parallelism,
+					}
 				default:
 					http.Error(w, "unsupported decode.mode: "+req.Decode.Mode, http.StatusBadRequest)
 					return
@@ -159,8 +165,9 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"num_workers": numWorkers,
 			"decode": map[string]any{
-				"mode":       string(decodeCfg.Mode),
-				"image_size": decodeCfg.ImageSize,
+				"mode":        string(decodeCfg.Mode),
+				"image_size":  decodeCfg.ImageSize,
+				"parallelism": decodeCfg.Parallelism,
 			},
 		})
 	})

@@ -45,6 +45,9 @@ class DatasetFSLoader(BaseLoader):
             self._transform = make_rgb_uint8_transform()
         else:
             self._transform = make_image_transform(self.image_size)
+        # opt 02: decode worker goroutines per pipeline (server-side decode
+        # only). 0 = auto (daemon picks NumCPU/num_workers).
+        self._decode_parallelism = int(self.spec.get("decode_parallelism", 0) or 0)
 
     def make_loader(self) -> DataLoader:
         kwargs = dict(
@@ -56,6 +59,8 @@ class DatasetFSLoader(BaseLoader):
         if self._decode_mode == DECODE_RGB_UINT8:
             kwargs["decode_mode"] = DECODE_RGB_UINT8
             kwargs["decode_image_size"] = self.image_size
+            if self._decode_parallelism > 0:
+                kwargs["decode_parallelism"] = self._decode_parallelism
         ds = DatasetFS(**kwargs)
         return DataLoader(
             ds,

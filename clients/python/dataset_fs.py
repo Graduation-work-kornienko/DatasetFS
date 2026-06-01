@@ -57,7 +57,8 @@ class DatasetFS(IterableDataset):
                  timeout_seconds=30.0,
                  daemon_url="http://localhost:51409",
                  decode_mode=DECODE_RAW,
-                 decode_image_size=None):
+                 decode_image_size=None,
+                 decode_parallelism=0):
         effective_workers = max(num_workers, 1)
         if effective_workers > MAX_WORKERS:
             raise ValueError(
@@ -88,6 +89,7 @@ class DatasetFS(IterableDataset):
         self.daemon_url = daemon_url
         self.decode_mode = decode_mode
         self.decode_image_size = decode_image_size
+        self.decode_parallelism = decode_parallelism
 
         self.decode_fn = decode_fn or _default_decode
         self.transform = transform or transforms.Compose([
@@ -99,6 +101,8 @@ class DatasetFS(IterableDataset):
             payload["seed"] = seed
         if decode_mode != DECODE_RAW:
             payload["decode"] = {"mode": decode_mode, "image_size": decode_image_size}
+            if decode_parallelism and decode_parallelism > 0:
+                payload["decode"]["parallelism"] = decode_parallelism
 
         resp = requests.post(
             f"{daemon_url}/initialize_loading",

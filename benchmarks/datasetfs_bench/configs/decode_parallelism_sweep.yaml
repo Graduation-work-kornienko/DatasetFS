@@ -1,0 +1,37 @@
+# Opt 02 K-scaling sweep: how daemon decode parallelism (worker goroutines per
+# pipeline) affects end-to-end throughput in the loader-bound regime.
+#
+# Single Python worker (num_workers=1 → one daemon pipeline) + SimpleCNN, so the
+# daemon's serial decode is the bottleneck and parallelizing it should lift sps.
+# K=1 reproduces the pre-opt-02 behavior (one decode goroutine); higher K spreads
+# decode across cores. Warm cache for BOTH cells (drop disabled) so there is no
+# cold-disk confound — we measure pure pipeline throughput.
+#
+# 4 K values × 3 seeds = 12 cells × ~30 s → ~6 min CPU.
+
+matrix:
+  dfs_decode_parallelism: [1, 2, 4, 8]
+
+dataset:
+  name: imagenette
+  imagefolder: data/formats/imagenette/imagefolder
+  webdataset: data/formats/imagenette/webdataset
+  datasetfs: data/formats/imagenette/datasetfs
+
+model: simplecnn
+batch_size: 64
+num_workers: 1
+image_size: 96
+
+dfs_decode_mode: rgb_uint8
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 60
+
+seeds: [0, 1, 2]
+loaders: [datasetfs]
+
+drop_page_cache_between_cells: false
+
+daemon_binary: bin/fuse_daemon
