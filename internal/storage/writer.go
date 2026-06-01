@@ -36,8 +36,6 @@ func (s *Storage) HandleWebdatasetShard(
 	metaKeeper := make(map[string]*index.Metadata, 5000)
 	currentShardId = <-shardIdChan
 
-	fmt.Println(currentShardId)
-
 	sourceFile, err := os.Open(tarPath)
 	if err != nil {
 		return fmt.Errorf("failed to open source tar: %w", err)
@@ -50,10 +48,7 @@ func (s *Storage) HandleWebdatasetShard(
 		return err
 	}
 
-	cnt := 0
-
 	for {
-		cnt++
 		header, err := tarReader.Next()
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
@@ -89,14 +84,7 @@ func (s *Storage) HandleWebdatasetShard(
 			continue
 		}
 
-		// fmt.Println(meta)
-		if cnt%100 == 0 {
-			fmt.Println(currentShardId)
-		}
-		// fmt.Println(currentSize)
-
 		if currentSize > index.ShardSize {
-			fmt.Println("change")
 			if currentTw != nil {
 				currentTw.Close()
 				currentFile.Close()
@@ -162,8 +150,6 @@ func (s *Storage) HandleWebdatasetShard(
 		currentTargetOffset += written + padding + 512
 	}
 
-	fmt.Println(cnt)
-
 	if currentTw != nil {
 		currentTw.Close()
 		currentFile.Close()
@@ -184,7 +170,6 @@ func (s *Storage) HandleWebdatasetShard(
 }
 
 func (s *Storage) createWriter(file **os.File, tw **tar.Writer, shardID int) error {
-	fmt.Println(shardID)
 	filename := s.ShardPath(shardID)
 	f, err := os.Create(filename)
 	if err != nil {

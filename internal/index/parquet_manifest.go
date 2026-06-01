@@ -3,6 +3,7 @@ package index
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -46,7 +47,9 @@ func LoadParquetManifest(root string) (*Manifest, error) {
 	manifests := make([]ParquetManifest, 1)
 	_, err = reader.Read(manifests)
 	reader.Close()
-	if err != nil {
+	// A single-row manifest comes back as (1, io.EOF): the reader signals
+	// end-of-file together with the last row. Only a non-EOF error is fatal.
+	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("read parquet manifest: %w", err)
 	}
 

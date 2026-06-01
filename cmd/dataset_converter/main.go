@@ -72,14 +72,11 @@ func generateConvertCommand(f parseFunc) func(*cobra.Command, []string) error {
 
 		coreIndex := index.NewIndex()
 		manifest := index.NewManifest(targetDir)
-		wal, err := index.OpenWAL(targetDir)
-		if err != nil {
-			return fmt.Errorf("failed to create WAL: %w", err)
-		}
 		storage := storage.New(targetDir, nil)
 
 		ctx := context.Background()
-		mutationManager := manager.NewMutationManager(coreIndex, manifest, wal, storage)
+		// nil WAL log, as it is not used in dataset converting
+		mutationManager := manager.NewMutationManager(coreIndex, manifest, nil, storage)
 
 		if err := f(ctx, mutationManager, sourceDir); err != nil {
 			return fmt.Errorf("failed to parse dataset folder: %w", err)

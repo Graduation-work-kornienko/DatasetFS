@@ -82,7 +82,7 @@ type JSONWAL struct {
 // The file is positioned at end (O_APPEND); Replay seeks to start, then back.
 // The format parameter specifies the WAL format to use ("json" or "binary").
 // If format is empty, defaults to "json".
-func openWAL(root, format string) (WAL, error) {
+func OpenWALWithFormat(root, format string) (WAL, error) {
 	// Default to JSON format if not specified
 	if format == "" {
 		format = walFormatJSON
@@ -118,18 +118,6 @@ func openWAL(root, format string) (WAL, error) {
 		f.Close()
 		return nil, fmt.Errorf("unsupported WAL format: %s", format)
 	}
-}
-
-// OpenWAL opens (or creates) the WAL file at <root>/wal.log in append+rw mode.
-// This is a compatibility wrapper that uses the JSON format.
-// Deprecated: Use OpenWALWithFormat instead.
-func OpenWAL(root string) (WAL, error) {
-	return openWAL(root, walFormatJSON)
-}
-
-// OpenWALWithFormat opens (or creates) the WAL file with the specified format.
-func OpenWALWithFormat(root, format string) (WAL, error) {
-	return openWAL(root, format)
 }
 
 // Path returns the absolute path of the WAL file. Useful for diagnostics.
@@ -246,7 +234,10 @@ func applyEntry(e *WALEntry, idx *CoreIndex) error {
 		if e.Delete == "" {
 			return fmt.Errorf("op=delete but Delete field is empty")
 		}
-		return idx.MarkDeleted(e.Delete)
+		// Replay is idempotent: a tombstone for an already-absent file is a
+		// no-op rather than a fatal error (see MarkDeletedTolerant).
+		idx.MarkDeletedTolerant(e.Delete)
+		return nil
 	case OpAppendShard:
 		if e.Shard == nil {
 			return fmt.Errorf("op=shard but Shard field is nil")

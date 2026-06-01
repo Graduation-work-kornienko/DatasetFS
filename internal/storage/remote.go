@@ -103,6 +103,49 @@ func (rs *RemoteStorage) Download(ctx context.Context, url string) (string, erro
 	return finalPath, nil
 }
 
+// Fetch downloads url to dst (writing atomically via a temp file + rename) and
+// errors on any non-200 status. Unlike Download it writes to a caller-chosen
+// path, which the daemon's prefetch uses to place each shard at exactly the
+// local name ShardPath expects.
+func (rs *RemoteStorage) Fetch(ctx context.Context, url, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return fmt.Errorf("create dst dir: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	resp, err := rs.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("get %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("get %s: status %d", url, resp.StatusCode)
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".fetch-*")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("write %s: %w", dst, err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("rename into %s: %w", dst, err)
+	}
+	return nil
+}
+
 // copyFile copies a file from src to dst
 func copyFile(src, dst string) error {
 	sourceFile, err := os.Open(src)

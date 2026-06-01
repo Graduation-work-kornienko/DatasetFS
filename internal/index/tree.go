@@ -63,6 +63,19 @@ func (i *CoreIndex) MarkDeleted(filename string) error {
 	return nil
 }
 
+// MarkDeletedTolerant marks a file deleted, treating a missing file as a no-op.
+// WAL replay must be idempotent: re-applying a tombstone for a file that a
+// later checkpoint already dropped (or that never made it into the recovered
+// index) must not abort recovery. Interactive deletes go through MarkDeleted,
+// which still errors on a missing file.
+func (i *CoreIndex) MarkDeletedTolerant(filename string) {
+	i.Mu.Lock()
+	defer i.Mu.Unlock()
+	if m, ok := i.FileMap[filename]; ok {
+		m.Deleted = true
+	}
+}
+
 func (i *CoreIndex) AddFile(m *Metadata) error {
 	i.Mu.Lock()
 	defer i.Mu.Unlock()
@@ -103,4 +116,31 @@ func (i *CoreIndex) AppendShard(shard *Shard) error {
 		i.FileMap[e.Path] = e
 	}
 	return nil
+}
+
+// Reload atomically replaces the in-memory index from a freshly loaded
+// manifest. Used after a background vacuum rewrites the dataset so the running
+// daemon reflects the compacted shards without a restart. Callers must ensure
+// no pipeline is concurrently reading (see ipc.BeginMaintenance); the delta
+// shard placeholder is NOT re-seeded here — see MutationManager.EnsureDelta.
+func (i *CoreIndex) Reload(m *Manifest) {
+	i.Mu.Lock()
+	defer i.Mu.Unlock()
+
+	i.FileMap = make(map[string]*Metadata, len(m.Files))
+	i.ShardMap = make(map[int]*Shard, len(m.ShardsMeta))
+
+	for id, s := range m.ShardsMeta {
+		sc := s
+		sc.Number = id
+		sc.Objects = nil
+		i.ShardMap[id] = &sc
+	}
+	for path, meta := range m.Files {
+		mc := meta
+		i.FileMap[path] = &mc
+		if sh, ok := i.ShardMap[mc.ShardID]; ok {
+			sh.Objects = append(sh.Objects, &mc)
+		}
+	}
 }

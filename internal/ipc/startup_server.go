@@ -44,11 +44,36 @@ func (s *session) stop() {
 }
 
 var (
-	mu             sync.Mutex
-	currentSession *session
+	mu                sync.Mutex
+	currentSession    *session
+	maintenanceActive bool
 )
 
-func StartServer(coreIdx *index.CoreIndex, rootPath string) {
+// BeginMaintenance reserves the dataset for an exclusive maintenance operation
+// (e.g. vacuum). It returns false if a loading session is active or another
+// maintenance op already holds the dataset. While held, /initialize_loading
+// responds 503 so no pipeline starts reading shards mid-rewrite.
+func BeginMaintenance() bool {
+	mu.Lock()
+	defer mu.Unlock()
+	if currentSession != nil || maintenanceActive {
+		return false
+	}
+	maintenanceActive = true
+	return true
+}
+
+// EndMaintenance releases the reservation taken by BeginMaintenance.
+func EndMaintenance() {
+	mu.Lock()
+	defer mu.Unlock()
+	maintenanceActive = false
+}
+
+// StartServer serves the daemon's HTTP control plane. strg is the storage the
+// pipeline workers read shards from (already pointed at the local root, with
+// any RemoteStorage attached by the caller).
+func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -94,6 +119,11 @@ func StartServer(coreIdx *index.CoreIndex, rootPath string) {
 		mu.Lock()
 		defer mu.Unlock()
 
+		if maintenanceActive {
+			http.Error(w, "dataset under maintenance (vacuum); retry shortly", http.StatusServiceUnavailable)
+			return
+		}
+
 		if currentSession != nil {
 			currentSession.stop()
 			currentSession = nil
@@ -105,7 +135,6 @@ func StartServer(coreIdx *index.CoreIndex, rootPath string) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		strg := &storage.Storage{Root: rootPath}
 
 		s := &session{alloc: alloc}
 		for wID := 0; wID < numWorkers; wID++ {

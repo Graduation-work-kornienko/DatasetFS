@@ -95,7 +95,7 @@ func (m *Manifest) Load(remoteStorage RemoteStorageInterface) error {
 	}
 
 	// Fall back to JSON manifest
-	jsonPath := filepath.Join(m.Root, manifestJSONFileName)
+	jsonPath := filepath.Join(localRoot, manifestJSONFileName)
 	file, err := os.Open(jsonPath)
 	if err != nil {
 		return err
@@ -111,12 +111,14 @@ func (m *Manifest) Load(remoteStorage RemoteStorageInterface) error {
 func (m *Manifest) Store() error {
 	// First try to store as Parquet
 	if err := StoreParquetManifest(m); err == nil {
+		// Parquet is now the source of truth (Load reads it first). Remove any
+		// stale JSON manifest so the two can't drift out of sync.
+		os.Remove(filepath.Join(m.Root, manifestJSONFileName))
 		return nil
 	}
 
 	// Fall back to JSON format
 	jsonPath := filepath.Join(m.Root, manifestJSONFileName)
-	fmt.Println(jsonPath)
 	file, err := os.Create(jsonPath)
 	if err != nil {
 		return err
@@ -155,10 +157,6 @@ func (m *Manifest) LoadCoreIndex() (*CoreIndex, error) {
 		if shard, exists := coreIdx.ShardMap[metaCopy.ShardID]; exists {
 			shard.Objects = append(shard.Objects, &metaCopy)
 		}
-	}
-
-	for id, shard := range coreIdx.ShardMap {
-		fmt.Println(id, len(shard.Objects))
 	}
 
 	return coreIdx, nil

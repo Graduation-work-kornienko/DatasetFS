@@ -7,6 +7,7 @@ import (
 	"hash/crc64"
 	"io"
 	"os"
+	"sync"
 )
 
 // Binary WAL format constants
@@ -211,8 +212,14 @@ func readString(r io.Reader) (string, error) {
 	return string(buf), nil
 }
 
-// BinaryWAL provides binary format WAL operations
+// BinaryWAL provides binary format WAL operations.
+//
+// All public methods that touch the file are serialized by mu, mirroring
+// JSONWAL: MutationManager already serializes its own callers, but the WAL
+// must be safe on its own so a future concurrent caller can't interleave a
+// record header with another record's data and corrupt the log.
 type BinaryWAL struct {
+	mu   sync.Mutex
 	file *os.File
 	// Reusable buffer for calculating checksums
 	checksumBuf []byte
@@ -337,6 +344,13 @@ func (bw *BinaryWAL) ReadEntry() (*WALEntry, error) {
 // On parse error or apply failure it returns immediately.
 // Restores the file position to EOF on exit so subsequent operations can continue appending.
 func (bw *BinaryWAL) Replay(idx *CoreIndex) (applied int, err error) {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+
+	if bw.file == nil {
+		return 0, fmt.Errorf("wal closed")
+	}
+
 	// Seek to beginning of file
 	if _, err := bw.file.Seek(0, io.SeekStart); err != nil {
 		return 0, fmt.Errorf("seek to start: %w", err)
@@ -384,6 +398,13 @@ func (bw *BinaryWAL) Replay(idx *CoreIndex) (applied int, err error) {
 
 // WriteEntry writes a WAL entry in binary format
 func (bw *BinaryWAL) WriteEntry(e *WALEntry) error {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+
+	if bw.file == nil {
+		return fmt.Errorf("wal closed")
+	}
+
 	// Calculate data length and serialize data
 	var data []byte
 	var err error
@@ -677,6 +698,9 @@ func (bw *BinaryWAL) LogAppendShard(shard *Shard) error {
 // stored — truncating before that would lose the very mutations the manifest
 // was supposed to capture.
 func (bw *BinaryWAL) Truncate() error {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+
 	if bw.file == nil {
 		return fmt.Errorf("wal closed")
 	}
@@ -687,11 +711,20 @@ func (bw *BinaryWAL) Truncate() error {
 	if _, err := bw.file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek wal start: %w", err)
 	}
+	// A binary WAL must always begin with the file header; truncating to 0
+	// erased it, so rewrite it to keep the file (and this handle) valid for
+	// subsequent appends and replays.
+	header := &WALFileHeader{Magic: walMagic, Version: walVersion, Flags: 0}
+	if err := header.WriteTo(bw.file); err != nil {
+		return fmt.Errorf("rewrite wal header: %w", err)
+	}
 	return bw.file.Sync()
 }
 
 // Close flushes and releases the WAL file descriptor.
 func (bw *BinaryWAL) Close() error {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
 	if bw.file == nil {
 		return nil
 	}

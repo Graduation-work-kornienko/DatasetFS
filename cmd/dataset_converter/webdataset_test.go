@@ -25,12 +25,11 @@ func TestWebdataset(t *testing.T) {
 
 	coreIndex := index.NewIndex()
 	manifest := index.NewManifest(targetDir)
-	wal, err := index.OpenWAL(targetDir)
 	require.NoError(t, err)
 	storage := storage.New(targetDir, nil)
 
 	ctx := context.Background()
-	mutationManager := manager.NewMutationManager(coreIndex, manifest, wal, storage)
+	mutationManager := manager.NewMutationManager(coreIndex, manifest, nil, storage)
 
 	err = ParseWebDataset(ctx, mutationManager, sourceDir)
 	require.NoError(t, err)

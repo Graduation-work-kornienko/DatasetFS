@@ -148,6 +148,17 @@ func (m *MutationManager) AddDeltaFile(logicalName string, tmpFilePath string) e
 	return nil
 }
 
+// WithExclusive runs fn while holding the mutation lock, so no FUSE mutation
+// (add/delete/append) interleaves. The background vacuumer uses this to rewrite
+// shards and reload the index atomically with respect to writes. The delta
+// shard's on-disk tar is recreated lazily on the next AddDeltaFile (it opens
+// with O_CREATE), so fn only needs to restore the in-memory ShardMap[-1] entry.
+func (m *MutationManager) WithExclusive(fn func() error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return fn()
+}
+
 // Simply Append shard(for dataset initialization only)
 func (m *MutationManager) AppendShard(shard *index.Shard) error {
 
