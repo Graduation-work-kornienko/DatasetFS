@@ -1,6 +1,7 @@
 import io
 import json
 import mmap
+import os
 import select
 import struct
 
@@ -15,6 +16,47 @@ MAX_WORKERS = 9
 # Server-side decode modes — must match pipeline.DecodeMode in the Go daemon.
 DECODE_RAW = "raw"            # legacy: daemon serves raw JPEG/etc bytes
 DECODE_RGB_UINT8 = "rgb_uint8"  # daemon serves pre-decoded uint8 HWC RGB
+
+# ---- Binary wire protocol (opt 03) ------------------------------------------
+# Must stay byte-compatible with internal/pipeline/dealer.go encodeFrame.
+# Frame = HEADER (magic u32, total_len u32, generation u64, item_count u32,
+# blob_len u32) + COLUMNAR (item_count × ITEM_DTYPE) + BLOBS (path+meta bytes).
+# Replaces the old newline-delimited JSON: for cheap-decode data (audio) the
+# JSON encode/parse + per-item dict was the dominant per-sample cost.
+_FRAME_MAGIC = 0x44465331          # "DFS1"
+_FRAME_HDR_LEN = 8                 # magic + total_len
+_FRAME_REST_LEN = 16               # generation + item_count + blob_len
+
+# Structured dtype for the columnar block — one vectorized np.frombuffer parses
+# all items at once (no per-item struct.unpack). align=False => packed layout
+# matching the Go encoder exactly. itemsize MUST equal dealer.go ItemWireSize.
+ITEM_DTYPE = np.dtype([
+    ("slot_id",  "<i4"),
+    ("offset",   "<i8"),
+    ("size",     "<i8"),
+    ("path_len", "<u4"),
+    ("meta_len", "<u4"),
+], align=False)
+assert ITEM_DTYPE.itemsize == 28, (
+    f"ITEM_DTYPE.itemsize={ITEM_DTYPE.itemsize}, expected 28 to match "
+    f"dealer.go ItemWireSize — Go/Python wire protocol drift"
+)
+
+
+def _read_exact(fd, n):
+    """Read exactly n bytes from raw fd, looping over short reads. Returns the
+    bytes, or None on clean EOF (writer closed) at/within a frame boundary."""
+    if n == 0:
+        return b""
+    chunks = []
+    remaining = n
+    while remaining > 0:
+        b = os.read(fd, remaining)
+        if not b:
+            return None  # EOF — writer (daemon dealer) closed the pipe
+        chunks.append(b)
+        remaining -= len(b)
+    return chunks[0] if len(chunks) == 1 else b"".join(chunks)
 
 
 def _default_decode(raw_bytes: bytes):
@@ -149,14 +191,18 @@ class DatasetFS(IterableDataset):
                 f"{world_size!r}. Likely a daemon version mismatch — rebuild it."
             )
 
-    def _decrement_refcount(self, refs_mmap, slot_id):
+    def _decrement_refcount_by(self, refs_mmap, slot_id, n):
+        """Subtract n from a slot's refcount in one read-modify-write (opt 03:
+        batched, was one write per sample). The Go planner recycles a slot when
+        its refcount hits 0; a slot's objects may span several frames, so each
+        frame subtracts only the count it consumed — the sum reaches 0 exactly
+        when the last frame holding the slot is drained. Only this worker writes
+        this slot (slots are partitioned per worker), so no locking is needed."""
+        if n == 0:
+            return
         offset = slot_id * 4
-
-        current_val_bytes = refs_mmap[offset : offset+4]
-        current_val = struct.unpack("<i", current_val_bytes)[0]
-
-        new_val = current_val - 1
-        refs_mmap[offset : offset+4] = struct.pack("<i", new_val)
+        current_val = struct.unpack_from("<i", refs_mmap, offset)[0]
+        struct.pack_into("<i", refs_mmap, offset, current_val - n)
 
     def __iter__(self):
         worker_info = get_worker_info()
@@ -170,97 +216,151 @@ class DatasetFS(IterableDataset):
 
             data_mmap = mmap.mmap(data_f.fileno(), 0, access=mmap.ACCESS_READ)
             refs_mmap = mmap.mmap(refs_f.fileno(), 0, access=mmap.ACCESS_WRITE)
+            # Zero-copy window into the slot buffers (opt 03): per-item slices of
+            # this are handed to decode without the old bytes() copy. Released
+            # before close (close() raises if any export is still live).
+            data_view = memoryview(data_mmap)
 
             print(f"[Python worker={worker_id}] Ожидание Pipe {pipe_path}")
 
-            with open(pipe_path, "r") as pipe:
-                print(f"[Python worker={worker_id}] Pipe подключен")
-
+            # Binary pipe (opt 03): readline() can't frame binary, so we read the
+            # raw fd with os.read + exact-length reads. O_RDONLY on a FIFO blocks
+            # until the daemon's dealer opens the write end — same rendezvous as
+            # the old open(pipe_path, "r").
+            fd = os.open(pipe_path, os.O_RDONLY)
+            print(f"[Python worker={worker_id}] Pipe подключен")
+            decoded = view = None
+            try:
                 while True:
-                    ready_to_read, _, _ = select.select([pipe], [], [], self.timeout_seconds)
-
+                    # select gates the FIRST byte of each frame so the 30s idle
+                    # timeout / end-of-epoch semantics are preserved.
+                    ready_to_read, _, _ = select.select([fd], [], [], self.timeout_seconds)
                     if not ready_to_read:
                         print(f"[Python worker={worker_id}] Таймаут ({self.timeout_seconds}s): данных нет. Завершаем эпоху.")
                         break
 
-                    line = pipe.readline()
-
-                    if not line:
+                    hdr = _read_exact(fd, _FRAME_HDR_LEN)
+                    if hdr is None:
                         print(f"[Python worker={worker_id}] Получен EOF. Завершаем эпоху.")
                         break
+                    magic, total_len = struct.unpack("<II", hdr)
+                    if magic != _FRAME_MAGIC:
+                        raise RuntimeError(
+                            f"bad frame magic {magic:#x} (expected {_FRAME_MAGIC:#x}); "
+                            f"Go/Python wire protocol mismatch — rebuild the daemon"
+                        )
 
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    try:
-                        batch_meta = json.loads(line)
-                    except json.JSONDecodeError as e:
-                        print(f"[Python worker={worker_id}] Ошибка парсинга JSON: {e}")
-                        continue
-
-                    if not batch_meta.get("items"):
-                        print(f"[Python worker={worker_id}] Датасет полностью прочитан (Пустой батч). Конец эпохи.")
+                    body = _read_exact(fd, total_len)
+                    if body is None:
+                        print(f"[Python worker={worker_id}] EOF в середине фрейма. Завершаем эпоху.")
                         break
 
-                    # Snapshot generation this batch was served from (feature F1).
+                    # Snapshot generation this frame was served from (feature F1).
                     # Constant for the whole epoch across all workers; a test
                     # asserts this to detect torn reads under concurrent mutation.
-                    batch_generation = batch_meta.get("generation")
+                    generation, item_count, _blob_len = struct.unpack_from("<QII", body, 0)
+                    if item_count == 0:
+                        print(f"[Python worker={worker_id}] Датасет полностью прочитан (Пустой фрейм). Конец эпохи.")
+                        break
 
-                    for item in batch_meta["items"]:
-                        slot_id = item["slot_id"]
-                        offset = item["offset"]
-                        size = item["size"]
+                    # One vectorized parse of the fixed columnar block; no
+                    # per-item struct.unpack.
+                    cols = np.frombuffer(
+                        body, dtype=ITEM_DTYPE, count=item_count, offset=_FRAME_REST_LEN,
+                    )
+                    slots = cols["slot_id"]
+                    offsets = cols["offset"]
+                    sizes = cols["size"]
+                    path_lens = cols["path_len"]
+                    meta_lens = cols["meta_len"]
 
-                        raw_bytes = bytes(data_mmap[offset : offset + size])
+                    # Variable section follows the columnar block.
+                    cursor = _FRAME_REST_LEN + item_count * ITEM_DTYPE.itemsize
 
+                    # Batched refcount (opt 03): count EVERY item toward its slot
+                    # — even those we skip below — so a slot with a decode failure
+                    # still reaches 0 and the planner recycles it (fixes a latent
+                    # slot leak). One decrement per slot after the frame loop.
+                    consumed = {}
+
+                    for i in range(item_count):
+                        slot_id = int(slots[i])
+                        consumed[slot_id] = consumed.get(slot_id, 0) + 1
+
+                        offset = int(offsets[i])
+                        size = int(sizes[i])
+                        pl = int(path_lens[i])
+                        ml = int(meta_lens[i])
+
+                        path = None
+                        if pl:
+                            path = body[cursor:cursor + pl].decode("utf-8")
+                        cursor += pl
+                        meta = None
+                        if ml:
+                            meta = json.loads(body[cursor:cursor + ml])
+                        cursor += ml
+
+                        # Zero-copy slice into the slot buffer, handed to decode
+                        # without the old bytes() copy. The slice MUST be released
+                        # before we yield: a generator paused at yield that is then
+                        # abandoned (GeneratorExit) would otherwise leave a live
+                        # export, and mmap.close() raises while any export is alive.
+                        # Decode/transform materialize owned objects, so releasing
+                        # the view here is safe (the slot itself can't recycle until
+                        # the per-slot decrement after this frame's loop).
+                        view = data_view[offset:offset + size]
+                        decoded = None
                         if self.decode_mode == DECODE_RGB_UINT8:
                             # Daemon already JPEG-decoded + resized; slot bytes
-                            # are a packed (H, W, 3) uint8 HWC tensor. Skip the
-                            # user-supplied decode_fn entirely.
+                            # are a packed (H, W, 3) uint8 HWC tensor. frombuffer
+                            # aliases the mmap (truly zero-copy now); ToTensor
+                            # materializes an owned float tensor.
                             h = w = self.decode_image_size
-                            expected = h * w * 3
-                            if size != expected:
-                                # Defensive: daemon misconfig or mode mismatch.
-                                # Skip rather than feeding wrong-shape garbage
-                                # into the transform.
-                                continue
-                            decoded = np.frombuffer(
-                                raw_bytes, dtype=np.uint8,
-                            ).reshape(h, w, 3)
+                            if size == h * w * 3:
+                                decoded = np.frombuffer(view, dtype=np.uint8).reshape(h, w, 3)
+                            # else: daemon misconfig / mode mismatch → skip below
                         else:
-                            decoded = self.decode_fn(raw_bytes)
-                            if decoded is None:
-                                # decoder signaled skip (e.g., corrupted image)
-                                continue
+                            decoded = self.decode_fn(view)
 
-                        try:
-                            tensor = self.transform(decoded)
-                        except Exception:
-                            # transform failure: skip this sample but keep going
+                        tensor = None
+                        if decoded is not None:
+                            try:
+                                tensor = self.transform(decoded)
+                            except Exception:
+                                tensor = None  # transform failure: skip, keep going
+
+                        # Drop any slot-aliasing array (rgb frombuffer view), then
+                        # release the slice — before yield, before any continue.
+                        decoded = None
+                        view.release()
+                        view = None
+
+                        if tensor is None:
+                            # decoder signaled skip (None), size mismatch, or
+                            # transform failure — already counted in `consumed`.
                             continue
 
-                        result = {"image": tensor}
-
-                        if batch_generation is not None:
-                            result["dfs_generation"] = batch_generation
-
-                        if "path" in item:
-                            result["path"] = item["path"]
-
-                        if "meta" in item and item["meta"]:
-                            meta_data = item["meta"]
-                            if isinstance(meta_data, dict):
-                                result.update(meta_data)
-                            elif isinstance(meta_data, list):
-                                result["annotations"] = meta_data
+                        result = {"image": tensor, "dfs_generation": generation}
+                        if path is not None:
+                            result["path"] = path
+                        if meta:
+                            if isinstance(meta, dict):
+                                result.update(meta)
+                            elif isinstance(meta, list):
+                                result["annotations"] = meta
                             else:
-                                result["meta_raw"] = meta_data
-
-                        self._decrement_refcount(refs_mmap, slot_id)
+                                result["meta_raw"] = meta
 
                         yield result
 
-            data_mmap.close()
-            refs_mmap.close()
+                    for slot_id, cnt in consumed.items():
+                        self._decrement_refcount_by(refs_mmap, slot_id, cnt)
+            finally:
+                os.close(fd)
+                # Drop any mmap-aliasing locals before releasing the view, else
+                # memoryview.release()/mmap.close() raise (live exported buffers).
+                decoded = view = None
+                data_view.release()
+                data_mmap.close()
+                refs_mmap.close()

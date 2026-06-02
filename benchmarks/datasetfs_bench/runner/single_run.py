@@ -89,6 +89,11 @@ def _build_loader(loader_name: str, cfg: dict, label_to_idx: dict, seed: int):
         return cls({**common, "root": ds["webdataset"]})
     if loader_name == "datasetfs":
         spec = {**common, "root": ds["datasetfs"]}
+        # Modality selects the client decode path: "image" (default, PIL or
+        # server-side rgb_uint8) or "audio" (soundfile → mel spectrogram, the
+        # generic raw transport — opt 03). Audio rejects rgb_uint8.
+        if "modality" in cfg:
+            spec["modality"] = cfg["modality"]
         # Optional server-side decode (Phase 3 architectural optimization):
         # daemon does JPEG decode + resize, Python skips PIL. Default is "raw".
         if "dfs_decode_mode" in cfg:

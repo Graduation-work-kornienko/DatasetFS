@@ -32,3 +32,4 @@
 |---|---|---|---|---|
 | [01](01-server-side-decode.md) | Server-side decode (JPEG decode + resize в daemon) | 2026-05-21 → 2026-05-22 | ✅ Завершена (закрыта opt 02) | Backend-swap (libjpeg-turbo) закрыл gap с -14% до -1.4% на ResNet-18; архитектура подтверждена |
 | [02](02-parallel-decode.md) | Параллельный server-side decode (пул K воркеров) | 2026-06-01 | ✅ Завершена | rgb_uint8 num_workers=0: **487 → 3136 sps (6.4×)**, обогнал raw PIL в 4.6×; +фикс teardown-SIGSEGV |
+| [03](03-pipeline-transport.md) | Транспорт пайплайна: бинарный wire вместо JSON-over-pipe + zero-copy SHM + батч-refcount (общий путь для аудио и любых типов) | 2026-06-02 | ✅ Завершена | Чистый транспорт **144.5k → ~205k sps (1.4×)**; +фикс slot-leak на пропущенных сэмплах; +аудио-бенч (G8) |

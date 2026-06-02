@@ -1,0 +1,33 @@
+# Audio benchmark — Speech Commands V2 through the GENERIC raw transport.
+#
+# Purpose (opt 03): images hide the pipeline transport behind PIL decode; audio
+# does not (soundfile is cheap), so this config measures the shared daemon→Python
+# path — the binary frame protocol, zero-copy SHM read, and batched refcount.
+# Also doubles as thesis graph G8 (data-type generality).
+#
+# modality=audio routes the DFS client through soundfile → log-mel spectrogram
+# (1, 32, T); model=simplecnn_audio is a 1-channel SimpleCNN so training stays
+# data-bound (the loader, not compute, gates throughput).
+
+dataset:
+  name: speech_commands
+  imagefolder: data/formats/speech_commands/imagefolder
+  webdataset: data/formats/speech_commands/webdataset
+  datasetfs: data/formats/speech_commands/datasetfs
+
+modality: audio
+model: simplecnn_audio
+batch_size: 64
+num_workers: 4
+image_size: 96          # unused for audio (mel shape fixed by n_mels/target)
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 120
+
+seeds: [0, 1, 2]
+loaders: [datasetfs]
+
+drop_page_cache_between_cells: false
+
+daemon_binary: bin/datasetfs

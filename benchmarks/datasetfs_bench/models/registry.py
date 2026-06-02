@@ -15,10 +15,10 @@ class SimpleCNN(nn.Module):
     """Tiny CNN — used when we want training to be data-bound, not compute-bound,
     so the loader differences dominate runtime."""
 
-    def __init__(self, num_classes: int = 10):
+    def __init__(self, num_classes: int = 10, in_channels: int = 3):
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(inplace=True), nn.MaxPool2d(2),
+            nn.Conv2d(in_channels, 16, 3, padding=1), nn.ReLU(inplace=True), nn.MaxPool2d(2),
             nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(inplace=True), nn.MaxPool2d(2),
             nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(inplace=True),
         )
@@ -45,6 +45,10 @@ def _resnet(arch: str, num_classes: int) -> nn.Module:
 def build_model(name: str, num_classes: int) -> nn.Module:
     if name == "simplecnn":
         return SimpleCNN(num_classes=num_classes)
+    if name == "simplecnn_audio":
+        # 1-channel: a log-mel spectrogram is a single-channel (1, n_mels, T)
+        # "image". The AdaptiveAvgPool2d head is already shape-agnostic.
+        return SimpleCNN(num_classes=num_classes, in_channels=1)
     if name in ("resnet18", "resnet50"):
         return _resnet(name, num_classes)
     raise ValueError(f"unknown model: {name}")

@@ -20,7 +20,13 @@ from clients.python import DatasetFS
 from clients.python.dataset_fs import DECODE_RAW, DECODE_RGB_UINT8
 
 from .base import BaseLoader
-from ._common import bound_dfs_collate, make_image_transform, make_rgb_uint8_transform
+from ._common import (
+    audio_decode_fn,
+    audio_melspec_transform,
+    bound_dfs_collate,
+    make_image_transform,
+    make_rgb_uint8_transform,
+)
 
 
 class DatasetFSLoader(BaseLoader):
@@ -35,13 +41,23 @@ class DatasetFSLoader(BaseLoader):
         r.raise_for_status()
 
         self._daemon_url = url
+        self._modality = self.spec.get("modality", "image")
         self._decode_mode = self.spec.get("decode_mode", DECODE_RAW)
         if self._decode_mode not in (DECODE_RAW, DECODE_RGB_UINT8):
             raise ValueError(
                 f"datasetfs spec.decode_mode must be one of "
                 f"{DECODE_RAW!r}/{DECODE_RGB_UINT8!r}, got {self._decode_mode!r}"
             )
-        if self._decode_mode == DECODE_RGB_UINT8:
+        # Audio (and any non-image type) goes through the generic raw transport:
+        # decode is cheap client-side, so server-side rgb_uint8 (JPEG-only) is
+        # meaningless here. This path is what opt 03 optimized.
+        self._decode_fn = None
+        if self._modality == "audio":
+            if self._decode_mode == DECODE_RGB_UINT8:
+                raise ValueError("modality='audio' is incompatible with decode_mode='rgb_uint8'")
+            self._decode_fn = audio_decode_fn
+            self._transform = audio_melspec_transform
+        elif self._decode_mode == DECODE_RGB_UINT8:
             self._transform = make_rgb_uint8_transform()
         else:
             self._transform = make_image_transform(self.image_size)
@@ -56,6 +72,8 @@ class DatasetFSLoader(BaseLoader):
             transform=self._transform,
             daemon_url=self._daemon_url,
         )
+        if self._decode_fn is not None:
+            kwargs["decode_fn"] = self._decode_fn
         if self._decode_mode == DECODE_RGB_UINT8:
             kwargs["decode_mode"] = DECODE_RGB_UINT8
             kwargs["decode_image_size"] = self.image_size
