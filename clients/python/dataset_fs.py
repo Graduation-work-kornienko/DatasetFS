@@ -58,7 +58,9 @@ class DatasetFS(IterableDataset):
                  daemon_url="http://localhost:51409",
                  decode_mode=DECODE_RAW,
                  decode_image_size=None,
-                 decode_parallelism=0):
+                 decode_parallelism=0,
+                 rank=0,
+                 world_size=1):
         effective_workers = max(num_workers, 1)
         if effective_workers > MAX_WORKERS:
             raise ValueError(
@@ -78,7 +80,19 @@ class DatasetFS(IterableDataset):
                     "decode_mode='rgb_uint8' requires decode_image_size as a "
                     f"positive int, got {decode_image_size!r}"
                 )
+        # Distributed (DDP) placement (feature F2). Each DDP rank runs its own
+        # daemon (distinct daemon_url + shm_*_path + pipe_path_template), and the
+        # daemon serves only this rank's disjoint shard partition. Defaults
+        # rank=0/world_size=1 = single-process, identical to the legacy path.
+        if not isinstance(world_size, int) or world_size < 1:
+            raise ValueError(f"world_size must be a positive int, got {world_size!r}")
+        if not isinstance(rank, int) or not (0 <= rank < world_size):
+            raise ValueError(
+                f"rank must be an int in [0, world_size={world_size}), got {rank!r}"
+            )
 
+        self.rank = rank
+        self.world_size = world_size
         self.num_workers = num_workers
         self.seed = seed
         self._effective_workers = effective_workers
@@ -103,6 +117,8 @@ class DatasetFS(IterableDataset):
             payload["decode"] = {"mode": decode_mode, "image_size": decode_image_size}
             if decode_parallelism and decode_parallelism > 0:
                 payload["decode"]["parallelism"] = decode_parallelism
+        if world_size > 1:
+            payload["distributed"] = {"rank": rank, "world_size": world_size}
 
         resp = requests.post(
             f"{daemon_url}/initialize_loading",
@@ -121,6 +137,16 @@ class DatasetFS(IterableDataset):
             raise RuntimeError(
                 f"daemon acknowledged decode_mode={ack_mode!r} but client asked for "
                 f"{decode_mode!r}. Likely a daemon version mismatch — rebuild it."
+            )
+        # Confirm the daemon partitioned for the rank/world we asked for; a stale
+        # daemon ignoring the `distributed` block would serve the full dataset to
+        # every rank (duplicate samples across ranks → biased gradient).
+        ack_dist = ack.get("distributed") or {}
+        ack_world = ack_dist.get("world_size", 1)
+        if ack_world != world_size:
+            raise RuntimeError(
+                f"daemon acknowledged world_size={ack_world!r} but client asked for "
+                f"{world_size!r}. Likely a daemon version mismatch — rebuild it."
             )
 
     def _decrement_refcount(self, refs_mmap, slot_id):

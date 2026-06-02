@@ -30,8 +30,8 @@ make test-audio         # = test-audio-correctness + test-audio-training
 make test-stability     # ~4 мин: 20 сессий
 make test-decode        # ~15 сек: 20 файлов pixel-сравнение vs PIL
 
-# Go-тесты (НЕ запускать `go test ./...` — main_test.go повиснет)
-make go-test            # = go test ./internal/... ./cmd/dataset_converter/...
+# Go-тесты
+make go-test            # = go test ./internal/... ./cmd/datasetfs/...
 ```
 
 ## По файлам
@@ -153,6 +153,6 @@ P0+P1 тесты (по терминологии плана):
 
 1. **Spawn-mode picklability**: все функции, передаваемые в DataLoader (`collate_fn`, `transform`, `decode_fn`) — module-level. Никаких lambdas/closures.
 2. **Daemon re-init между эпохами**: если тест итерирует несколько раз — вызывать `daemon.restart()` между прогонами. Pipe-state иначе может interfere.
-3. **Не запускать `go test ./...`** — `cmd/fuse_daemon/main_test.go` повиснет. Использовать `make go-test`.
+3. **Go-тесты**: `make go-test` (= `go test ./internal/... ./cmd/datasetfs/...`). Прежний висящий `cmd/fuse_daemon/main_test.go` удалён вместе с объединением бинарников.
 4. **Timeout-маркер**: длинные тесты помечать `pytest.mark.timeout(N)`. Дефолт pytest-timeout — 0 (нет лимита).
 5. **`-s` для прогрессивного вывода**: добавлять `-s` в `pytest` для длинных тестов (stability, training) чтобы видеть epoch-by-epoch прогресс. Уже в Makefile-таргетах.

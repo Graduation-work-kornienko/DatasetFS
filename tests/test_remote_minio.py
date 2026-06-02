@@ -78,17 +78,9 @@ def _collate(items, label_to_idx):
 # --------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def converter_binary() -> Path:
-    binary = REPO_ROOT / "bin" / "dataset_converter"
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["go", "build", "-o", str(binary), "./cmd/dataset_converter"],
-                   cwd=REPO_ROOT, check=True)
-    return binary
-
-
-@pytest.fixture(scope="module")
-def daemon_binary() -> Path:
-    binary = REPO_ROOT / "bin" / "fuse_daemon"
+def datasetfs_binary() -> Path:
+    """Build the single datasetfs binary (daemon | vacuum | converter)."""
+    binary = REPO_ROOT / "bin" / "datasetfs"
     binary.parent.mkdir(parents=True, exist_ok=True)
     env = {
         **os.environ,
@@ -98,9 +90,19 @@ def daemon_binary() -> Path:
             + (":" + os.environ["PKG_CONFIG_PATH"] if "PKG_CONFIG_PATH" in os.environ else "")
         ),
     }
-    subprocess.run(["go", "build", "-o", str(binary), "./cmd/fuse_daemon"],
+    subprocess.run(["go", "build", "-o", str(binary), "./cmd/datasetfs"],
                    cwd=REPO_ROOT, env=env, check=True)
     return binary
+
+
+@pytest.fixture(scope="module")
+def converter_binary(datasetfs_binary: Path) -> Path:
+    return datasetfs_binary
+
+
+@pytest.fixture(scope="module")
+def daemon_binary(datasetfs_binary: Path) -> Path:
+    return datasetfs_binary
 
 
 @pytest.fixture(scope="module")
@@ -122,7 +124,7 @@ def datasetfs_dir(tmp_path_factory, converter_binary: Path) -> Path:
 
     out = base / "datasetfs"
     subprocess.run(
-        [str(converter_binary), "dataset-folder", "--source", str(imgfolder), "--target", str(out)],
+        [str(converter_binary), "converter", "dataset-folder", "--source", str(imgfolder), "--target", str(out)],
         cwd=REPO_ROOT, check=True,
     )
     # Converter writes parquet manifest + base shards (+ empty delta shard_-1).
@@ -200,7 +202,7 @@ def minio_bucket(datasetfs_dir: Path):
 
 
 class _RemoteDaemon:
-    """Launches fuse_daemon against a remote (HTTP) root with a cache dir."""
+    """Launches the datasetfs daemon against a remote (HTTP) root with a cache dir."""
 
     def __init__(self, binary: Path, root_url: str, cache_dir: Path):
         self.binary = binary
@@ -216,7 +218,7 @@ class _RemoteDaemon:
         self._log_path = log_dir / f"daemon-remote-{int(time.time()*1000)}.log"
         self._log_file = open(self._log_path, "w")
         self._proc = subprocess.Popen(
-            [str(self.binary), "--no-mount",
+            [str(self.binary), "daemon", "--no-mount",
              "--root", self.root_url,
              "--cache-dir", str(self.cache_dir)],
             cwd=REPO_ROOT, stdout=self._log_file, stderr=subprocess.STDOUT,

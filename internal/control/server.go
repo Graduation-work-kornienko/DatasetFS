@@ -1,4 +1,4 @@
-package ipc
+package control
 
 import (
 	"encoding/json"
@@ -16,9 +16,19 @@ import (
 )
 
 type initRequest struct {
-	NumWorkers int           `json:"num_workers"`
-	Seed       *uint64       `json:"seed,omitempty"`
-	Decode     *decodeOption `json:"decode,omitempty"`
+	NumWorkers  int                `json:"num_workers"`
+	Seed        *uint64            `json:"seed,omitempty"`
+	Decode      *decodeOption      `json:"decode,omitempty"`
+	Distributed *distributedOption `json:"distributed,omitempty"`
+}
+
+// distributedOption carries this rank's place in a DDP job (feature F2).
+// Optional; when omitted the session runs single-process (rank 0, world 1).
+// The daemon serves only this rank's shard partition; the deployment runs one
+// daemon per rank (one per node on multi-node) with distinct ports/SHM/pipes.
+type distributedOption struct {
+	Rank      int `json:"rank"`
+	WorldSize int `json:"world_size"`
 }
 
 // decodeOption mirrors pipeline.DecodeConfig over JSON. Optional; omitted
@@ -94,6 +104,8 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 		numWorkers := 1
 		var seed *uint64
 		decodeCfg := pipeline.DecodeConfig{Mode: pipeline.DecodeRaw}
+		// Distributed defaults: single-process (rank 0 of a world of 1).
+		rank, worldSize := 0, 1
 		if body, err := io.ReadAll(r.Body); err == nil && len(body) > 0 {
 			var req initRequest
 			if jerr := json.Unmarshal(body, &req); jerr != nil {
@@ -121,6 +133,18 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 					}
 				default:
 					http.Error(w, "unsupported decode.mode: "+req.Decode.Mode, http.StatusBadRequest)
+					return
+				}
+			}
+			if req.Distributed != nil {
+				worldSize = req.Distributed.WorldSize
+				rank = req.Distributed.Rank
+				if worldSize < 1 {
+					http.Error(w, "distributed.world_size must be >= 1", http.StatusBadRequest)
+					return
+				}
+				if rank < 0 || rank >= worldSize {
+					http.Error(w, "distributed.rank must be in [0, world_size)", http.StatusBadRequest)
 					return
 				}
 			}
@@ -164,6 +188,8 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 				PipePath:   pipeline.PipePath(wID),
 				Seed:       seed,
 				Decode:     decodeCfg,
+				Rank:       rank,
+				WorldSize:  worldSize,
 			}
 			p := pipeline.NewPipeline(snap, strg, alloc, cfg)
 			p.Initiate()
@@ -180,6 +206,10 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 				"mode":        string(decodeCfg.Mode),
 				"image_size":  decodeCfg.ImageSize,
 				"parallelism": decodeCfg.Parallelism,
+			},
+			"distributed": map[string]any{
+				"rank":       rank,
+				"world_size": worldSize,
 			},
 		})
 	})

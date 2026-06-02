@@ -80,7 +80,7 @@ bound) получили паритет, а loader-bound сценарий не б
 - **Бэкенды не тронуты**: `decoder_libjpeg.go`/`decoder_purego.go` без изменений;
   `newJPEGDecoder()` вызывается K раз, по инстансу на воркера. Оба build-тега собираются.
 
-### Параллелизм-кноб ([pipeline.go](../../internal/pipeline/pipeline.go), [startup_server.go](../../internal/ipc/startup_server.go))
+### Параллелизм-кноб ([pipeline.go](../../internal/pipeline/pipeline.go), [startup_server.go](../../internal/control/server.go))
 
 `DecodeConfig.Parallelism` (0 = auto). `resolveParallelism` = `max(1, NumCPU/NumWorkers)`,
 чтобы суммарно `NumWorkers·K` не пересабскрайбило ядра. Прокидывается через

@@ -137,7 +137,7 @@ func (i *CoreIndex) AppendShard(shard *Shard) error {
 // Reload atomically replaces the in-memory index from a freshly loaded
 // manifest. Used after a background vacuum rewrites the dataset so the running
 // daemon reflects the compacted shards without a restart. Callers must ensure
-// no pipeline is concurrently reading (see ipc.BeginMaintenance); the delta
+// no pipeline is concurrently reading (see control.BeginMaintenance); the delta
 // shard placeholder is NOT re-seeded here — see MutationManager.EnsureDelta.
 func (i *CoreIndex) Reload(m *Manifest) {
 	i.Mu.Lock()

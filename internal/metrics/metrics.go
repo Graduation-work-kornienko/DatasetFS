@@ -1,5 +1,5 @@
 // Package metrics is a tiny, dependency-free observability layer for the
-// fuse_daemon: atomic counters, gauge setters, and a bounded latency tracker
+// datasetfs daemon: atomic counters, gauge setters, and a bounded latency tracker
 // that computes percentiles on demand. Exposed as JSON at /metrics so the
 // Python benchmark harness can poll without adding any extra Go deps.
 package metrics

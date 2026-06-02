@@ -142,12 +142,23 @@ def prepare_huggingface(ds: FastaiDataset, extracted: Path, out: Path) -> None:
 
 
 def _ensure_converter_binary(repo_root: Path) -> Path:
-    binary = repo_root / "bin" / "dataset_converter"
+    binary = repo_root / "bin" / "datasetfs"
     binary.parent.mkdir(parents=True, exist_ok=True)
-    print(f"[go build] dataset_converter → {binary}", flush=True)
+    print(f"[go build] datasetfs → {binary}", flush=True)
+    # cgo for libjpeg-turbo: the converter subcommand shares the daemon's binary,
+    # which pulls in internal/pipeline. Mirror Makefile's CGO_ENV.
+    env = {
+        **os.environ,
+        "CGO_ENABLED": "1",
+        "PKG_CONFIG_PATH": (
+            "/opt/homebrew/opt/jpeg-turbo/lib/pkgconfig"
+            + (":" + os.environ["PKG_CONFIG_PATH"] if "PKG_CONFIG_PATH" in os.environ else "")
+        ),
+    }
     subprocess.run(
-        ["go", "build", "-o", str(binary), "./cmd/dataset_converter"],
+        ["go", "build", "-o", str(binary), "./cmd/datasetfs"],
         cwd=repo_root,
+        env=env,
         check=True,
     )
     return binary
@@ -168,7 +179,7 @@ def prepare_datasetfs(ds: FastaiDataset, class_root: Path, out: Path, repo_root:
 
     print(f"[dfs] {ds.name}: converting {class_root} → {out}", flush=True)
     subprocess.run(
-        [str(binary), "dataset-folder", "--source", str(class_root), "--target", str(out)],
+        [str(binary), "converter", "dataset-folder", "--source", str(class_root), "--target", str(out)],
         cwd=repo_root,
         check=True,
     )

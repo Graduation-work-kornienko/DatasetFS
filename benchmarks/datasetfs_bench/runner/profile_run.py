@@ -89,7 +89,7 @@ def _start_daemon(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = open(log_path, "w")
     cmd = [
-        str(binary), "--no-mount", "--root", str(root),
+        str(binary), "daemon", "--no-mount", "--root", str(root),
         f"--mutex-profile-rate={mutex_rate}",
         f"--block-profile-rate={block_rate}",
     ]
@@ -201,7 +201,7 @@ def main() -> int:
 
     out_dir: Path = args.output
     out_dir.mkdir(parents=True, exist_ok=True)
-    daemon_binary = REPO_ROOT / "bin" / "fuse_daemon"
+    daemon_binary = REPO_ROOT / "bin" / "datasetfs"
     daemon_log = out_dir / "daemon.log"
 
     label_to_idx = _label_index(REPO_ROOT / args.imagefolder_root)

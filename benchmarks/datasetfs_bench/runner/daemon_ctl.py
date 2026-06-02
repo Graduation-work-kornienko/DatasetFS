@@ -41,7 +41,7 @@ def wait_for_healthz(url: str, timeout: float = 30.0) -> None:
 
 
 class DaemonManager:
-    """Owns one fuse_daemon process. Single-instance per benchmark run.
+    """Owns one datasetfs daemon process. Single-instance per benchmark run.
     Re-init the dataset for each loader iteration via /initialize_loading;
     the daemon process itself stays up."""
 
@@ -70,11 +70,11 @@ class DaemonManager:
         else:
             stdout = subprocess.DEVNULL
         print(
-            f"[daemon] start {self.binary} --no-mount --root {self.root_path}",
+            f"[daemon] start {self.binary} daemon --no-mount --root {self.root_path}",
             flush=True,
         )
         self._proc = subprocess.Popen(
-            [str(self.binary), "--no-mount", "--root", str(self.root_path)],
+            [str(self.binary), "daemon", "--no-mount", "--root", str(self.root_path)],
             cwd=self.cwd,
             stdout=stdout,
             stderr=subprocess.STDOUT,

@@ -1,6 +1,6 @@
 # Состояние проекта DatasetFS
 
-Снимок состояния на **2026-05-22**. Обновлять при значимых переходах (смена фазы, завершение оптимизации, новое направление).
+Снимок состояния на **2026-06-01**. Обновлять при значимых переходах (смена фазы, завершение оптимизации, новое направление).
 
 ## Где мы по фазам плана
 
@@ -10,26 +10,51 @@
 | 1 | Correctness suite (images + audio + manifest + training) | ✅ Done |
 | 2 | MVP benchmark (3 loaders, ResNet-18, headline bar chart) | ✅ Done |
 | 3 | Metrics + sweep infrastructure | ✅ Done (workers/batch sweeps, daemon `/metrics`, psutil, cache-control, stability) |
-| **Optimization track** | Server-side decode (opt 01) → ... | 🔄 **Opt 01 в Iter 2** |
+| **Optimization track** | Server-side decode (opt 01) → параллельный декод (opt 02) → ... | ✅ **Opt 01 + 02 завершены** |
 | 4 | Full matrix (FFCV, HF Parquet, ResNet-50, дополнительные датасеты в headline) | Не начат |
 | 5 | Polish (notebook, LaTeX, README) | Не начат |
 
+## Новые фичи: vacuum / parquet-манифест / бинарный WAL / remote storage (2026-06-01)
+
+Эти четыре фичи были добавлены отдельной итерацией, затем проверены и
+доведены до рабочего состояния (исходно код не собирался / терял данные).
+Дизайн-доки в `docs/{vacuum_design,remote_storage_analysis,manifest_format_migration}.md`
+**описывают замысел, а не текущую реализацию** — ниже факт.
+
+| Фича | Состояние | Тесты |
+|---|---|---|
+| Parquet-манифест | ✅ работает (Store пишет parquet и удаляет stale jsonl; Load читает parquet, jsonl — фолбэк). Был баг: `io.EOF` трактовался как фатальный → манифест не читался | `internal/index/parquet_manifest_test.go` |
+| Бинарный WAL | ✅ работает, потокобезопасен (добавлен мьютекс); `Truncate` переписывает заголовок | `internal/index/binary_wal_test.go` (+race) |
+| Vacuum | ✅ переписан: читает живые байты **из существующих шардов** по `(Offset,Size)`, пишет во временные шарды, атомарный swap; `--dry-run` ничего не трогает. Общий пакет `internal/vacuum`, CLI `cmd/vacuum` — тонкая обёртка | `internal/vacuum/vacuum_test.go` |
+| Background vacuumer | ✅ теперь **горутина в демоне** (`--auto-vacuum`, off by default), а не отдельная программа (удалена `cmd/background_vacuum`). Координация через `ipc.BeginMaintenance` + `MutationManager.WithExclusive`; после vacuum — `CoreIndex.Reload` | покрыт `TestVacuum_FragmentationAndReload` + boot-smoke |
+| Remote storage | ✅ работает по HTTP через **prefetch-в-кэш** при старте (`--root http://… --cache-dir …`). `ipc.StartServer` теперь принимает `*storage.Storage`. S3-SDK/`s3://` — вне рамок (анонимный HTTP-бакет MinIO) | `tests/test_remote_minio.py` (MinIO в Docker + обучение) |
+
+Команды: `make go-test` (Go-юниты), `make test-remote` (MinIO+обучение, скипается без Docker/`minio` SDK), `go run ./cmd/datasetfs vacuum --root <ds> --dry-run`.
+
+Известные пред-существующие баги (НЕ из этих фич, не трогал): converter
+webdataset-пути пишет `TotalSize = сумма raw-размеров` без tar-заголовков/паддинга
+(`internal/storage/writer.go`), и `go test ./...` без cgo-тега падает на decoder
+(`make build-purego` использует `-tags datasetfs_purego`).
+
 ## Что сейчас лежит на столе
 
-### Optimization 01 — server-side decode (в работе)
+### Optimization 01 + 02 — server-side decode → параллельный декод ✅ ЗАВЕРШЕНЫ
 
-Полный контекст: [optimizations/01-server-side-decode.md](optimizations/01-server-side-decode.md).
+Полный контекст: [optimizations/01-server-side-decode.md](optimizations/01-server-side-decode.md),
+[optimizations/02-parallel-decode.md](optimizations/02-parallel-decode.md).
 
-- Итерация 1 (pure Go) — **завершена**. Архитектура подтверждена, gap -14% vs PIL.
-- Итерация 2 (libjpeg-turbo через cgo) — **запущена**:
-  - ✅ Декодер вынесен в swappable интерфейс (`jpegDecoder`)
-  - ✅ `decoder_purego.go` (build tag `datasetfs_purego`) + `decoder_libjpeg.go` (default, cgo + TurboJPEG)
-  - ✅ Makefile собирает с `CGO_ENABLED=1 PKG_CONFIG_PATH=...`
-  - ✅ Pytest-фикстура `daemon_binary` синхронизирована с Makefile'ом
-  - ✅ `test-decode` проходит (max diff 1 vs PIL — даже лучше pure Go)
-  - ✅ ResNet-18 A/B прогнан: rgb_uint8 = -1.4% от raw (closed gap с -14%)
-  - ⏸ **Следующий шаг — `make bench-decode-compare-simplecnn`** (SimpleCNN A/B, loader-bound, ~3-4 мин)
-  - ⏸ После этого — финализация opt 01 в журнале (статус → завершено)
+- **Opt 01** (decode в демоне, libjpeg-turbo через cgo): архитектура подтверждена,
+  ResNet-18 A/B gap -14% → -1.4%. Открытый вопрос про loader-bound выигрыш закрыт opt 02.
+- **Opt 02** (параллельный декод, пул K воркер-горутин на пайплайн):
+  - Корень проблемы: декод демона был однопоточным → при малом числе воркеров демон не
+    успевал кормить даже одного консумера (`rgb_uint8` был медленнее raw PIL).
+  - ✅ Микро (num_workers=0): **487 → 3136 sps (6.4×)**, обогнал raw PIL (689) в **4.6×**.
+  - ✅ End-to-end K-sweep (num_workers=1, SimpleCNN): K=1 378 → K=2 511 sps (+35%), плато при K≥2.
+  - ✅ Кноб `decode.parallelism` (auto = NumCPU/NumWorkers); bench-ось `dfs_decode_parallelism`.
+  - ✅ Дешёвый выигрыш: refcount poll 100 мс → 2 мс ([planner.go](../internal/pipeline/planner.go)).
+  - ✅ Побочно устранён **use-after-Munmap SIGSEGV** на teardown сессии (Pipeline.Stop теперь
+    джойнит горутины до Munmap; loader/dealer-отправки сделаны ctx-aware).
+  - ✅ `test-decode` (max diff 1), `go test -race` зелёный на обоих build-тегах.
 
 ### Phase 3 doings — итоги
 
@@ -40,44 +65,82 @@
 - Profiling-harness `benchmarks/datasetfs_bench/runner/profile_run.py` — снимает CPU/mutex/block/goroutine/heap + Python cProfile одновременно
 - Mutex/block profile flags на daemon'е (`--mutex-profile-rate`, `--block-profile-rate`)
 
-## План оптимизаций
+## Конечная цель: каталог графиков + очередь фич
 
-Очередь после opt 01, перетриажированная под **«гибкая ФС с современными практиками + конкурентоспособная производительность»** (см. [memory/project_datasetfs_goal](../.claude/projects/-Users-true-danil-12-Graduation-work-DatasetFS/memory/project_datasetfs_goal.md)).
+Конечная цель диплома (формулировка пользователя 2026-06-01) — **обширный каталог
+объёмных графиков** по многим осям, каждый демонстрирует свойство системы
+(современность / конкурентность / гибкость). Полный каталог **G1–G14** и две новые
+фичи (F1, F2) — в [HANDOFF.md](../HANDOFF.md) → «Benchmark & graph catalog» и
+«Roadmap to thesis completion». Здесь — очередь работ под этот каталог.
 
-### Tier A — следующие кандидаты (после opt 01)
+**Дисциплина метрик (применяется к КАЖДОМУ бенчмарку, требование 2026-06-01).**
+У каждого бенча — исчерпывающий набор метрик; по каждой метрике зафиксировано
+*зачем* её отслеживаем и *какую гипотезу* она подтверждает/опровергает; и проверка
+достаточности: *позволяют ли метрики заключить «X быстрее/лучше» И объяснить почему?*
+Если у результата ≥2 объяснения, неразличимых метриками, — набор недостаточен.
+(Именно так шли opt 01→02: throughput говорил «rgb медленнее», и только daemon-CPU
++ Python-idle% + per-stage профиль вскрыли *почему* — последовательный декод.)
+Полная таксономия метрик — в [HANDOFF.md](../HANDOFF.md) → «Metrics discipline»,
+инвентарь и пробелы — в [benchmarking.md](benchmarking.md).
 
-**Opt 02 — Concurrent training + mutations bench.** Уникальная фича DFS, которой нет у WebDataset (tar immutable). У нас есть `MutationManager` ([internal/manager/mutation_manager.go](../internal/manager/mutation_manager.go)), но **нет тестов** и нет бенчмарка. План:
-1. Написать тест: обучение идёт, в это время отдельный поток вызывает `AddDeltaFile` / `DeleteFile`
-2. Бенч-конфиг с метриками: «насколько просел throughput из-за параллельной мутации»
-3. Сравнение: WebDataset вообще не запускается в таком режиме → качественный аргумент
+### Tier A — фичи под флагманские графики (наибольший вес для диплома)
 
-**Opt 03 — S3 streaming + Cold Start bench.** Минимальная версия: манифест с URL'ами вместо локальных файлов, daemon скачивает шард при load'е. Бонус: Cold Start bench, где DFS должен показать «учимся пока тянем данные». Реальная стоимость — 1-2 недели работы.
+**F1 — Snapshot-консистентная мутация при обучении (→ график G3). НОВОЕ.**
+Ключевая мысль пользователя: мутировать датасет во время обучения нужно (online
+learning), но running-эпоха не должна видеть «рваное» полу-применённое состояние.
+→ нужен механизм консистентности: тренировка **пинит снапшот / поколение манифеста**
+на старте эпохи; мутации создают *новое* поколение (MVCC / copy-on-write); ридер
+держит свой вид до перепина. Кирпичи есть (`MutationManager.WithExclusive`, vacuum
+temp→swap, `CoreIndex.Reload`), но **снапшот-изоляция не спроектирована**. Это
+флагманский аргумент гибкости (WebDataset обходит проблему запретом мутаций).
+Сюда же — отложенный тест #6 (тесты на мутации) и бенч «throughput vs темп мутаций».
 
-**Opt 04 — Pipeline optimization next layer.** Когда decode уже не bottleneck — кто следующий? Из профиля видно:
-- JSON encoding в DealerWorker — небольшой, но не нулевой
-- SHM-чтение из Python (`bytes(data_mmap[off:off+size])` — memcpy)
-- pipe-write blocking
+**F2 — Распределённое обучение (→ график G7). НОВОЕ.** Демон должен стать
+rank/world-size-aware (шардинг поверх существующего per-worker слот-партишена).
+Сначала одно-узловой DDP, потом мульти-узловой. График: масштабирование throughput
+vs число процессов/GPU/узлов.
 
-Открытое направление; до этого нужно завершить opt 01.
+**G13 — End-to-end «реальный режим» (вдолгую). НОВОЕ.** Интегративный бенч поверх
+F1: обучение + конкурентные мутации много эпох, активный vacuumer, запись WAL.
+Один прогон доказывает, что вся история online-learning держится — корректность
+(consistency violations = 0), эффективность (vacuum держит фрагментацию, WAL дёшев),
+стабильность (нет дрейфа/утечек — расширяет `tests/test_stability.py`).
 
-### Tier B — стоит вписать в diploma
+**Формат-матрица (→ график G1).** Лоадеры и format-prep для LMDB, TFRecord, HDF5,
+HuggingFace (Arrow/Parquet), FFCV (Linux). Сейчас готовы только ImageFolder/
+WebDataset/HF/DFS. Самый объёмный пункт по числу графиков.
 
-**CoorDL / Plumber related work** — раздел в дипломе про современные подходы. Имплементация cross-worker decoded cache (CoorDL-style) — возможна в DFS благодаря центральному daemon'у, но дорогая. Анализ-only обязателен.
+**G12 — Мультимодальная / сложно-структурированная модель. НОВОЕ.** Модель с
+многополевым сэмплом (image+text или image+audio+tabular) — доказывает, что DFS
+корректно отдаёт гетерогенные per-sample структуры, и нагружает metadata/collate-путь,
+а не только сырые байты картинки. Нужны мультимодальный датасет + collate.
 
-**Video / макрообъекты** — гибкость по типам данных. SlotSize=110 MB не вмещает видеоклип; нужен либо больший слот, либо chunked-доступ. Архитектурно интересно, но дорого.
+### Tier B — дешёвые графики (фичи built, нужен только бенч)
 
-### Tier C — future work (упомянуть в дипломе как направления)
+- **Background vacuumer on/off (→ G4)** — throughput с `--auto-vacuum`, фрагментация
+  по эпохам, latency в окна обслуживания.
+- **WAL формат (→ G5)** — JSONL vs binary WAL: write tput, размер лога, recovery.
+- **Манифест формат (→ G6)** — JSONL vs Parquet: load time, RAM, размер.
+- **Remote / S3 (→ G9 кривая + G14 выделенный сценарий)** — cold-start, prefetch
+  overlap, cache hit ratio, end-to-end «учимся пока тянем» из remote.
+- **Pipeline next layer (opt 03, → конкурентность)** — после decode переузким местом
+  могут стать JSON-over-pipe в `DealerWorker`, SHM-memcpy в Python, pipe-write.
+  Профилировать после ре-замера headline.
 
-- Distributed training (одно-узловой DDP)
-- Background vacuumer / compaction (если mutations попадают в бенчмарк)
-- FUSE-mount mode (`internal/vfs/` сейчас untested)
-- HuggingFace Parquet как ещё один бейзлайн
+### Tier C — широта данных / типов
+
+- ResNet-50 + 5 seeds для thesis-grade headline; PubLayNet (size-scaling), доп. аудио.
+- **Реальные числа на Linux + GPU** (сейчас всё macOS/CPU — крупнейший пробел).
+- Video / макрообъекты — `SlotSize=110 MB` не вмещает видеоклип; нужен больший слот
+  или chunked-доступ. Архитектурно интересно, дорого → future work.
+- CoorDL/Plumber related-work раздел (cross-worker decoded cache — анализ-only).
+- FUSE-mount mode (`internal/vfs/` untested, отложенный тест #5).
 
 ## Открытые вопросы / TODO
 
 - **`sweep_plots.py` плохо рисует string-ось** (raw / rgb_uint8) — warning «No artists with labels». CSV корректный, но плот не информативен. Фикс: ветка для категориальных осей. Низкий приоритет.
 - **Numpy non-writable warning** в `transforms.ToTensor()` для rgb_uint8: торч ругается «not writable». На корректность не влияет (`.contiguous()` создаёт writable копию), но pollute'ит логи. Косметика — `np.frombuffer(...).copy()` уберёт варн ценой одного memcpy.
-- **HANDOFF.md устарел** в отношении новых docs/ и optimizations/. Можно дописать pointer на `docs/README.md` (как entry point — толще, чем HANDOFF, но если новая сессия — пройдёт через HANDOFF).
+- **HANDOFF.md актуализирован 2026-06-01** — содержит каталог графиков G1–G11, фичи F1/F2, roadmap до защиты. Источник правды для новой сессии.
 
 ## Что лежит на ветке (git)
 
@@ -85,7 +148,7 @@
 - `internal/pipeline/decoder.go` (новый orchestration)
 - `internal/pipeline/decoder_purego.go`, `decoder_libjpeg.go` (новые backends)
 - `internal/pipeline/pipeline.go` (DecodeMode/DecodeConfig + optional decoder stage)
-- `internal/ipc/startup_server.go` (decode-config parse в `/initialize_loading`)
+- `internal/control/server.go` (decode-config parse в `/initialize_loading`)
 - `cmd/fuse_daemon/main.go` (pprof flags)
 - `clients/python/dataset_fs.py` (decode_mode + rgb_uint8 path)
 - `benchmarks/datasetfs_bench/loaders/datasetfs.py` + `_common.py` (decode_mode passthrough)

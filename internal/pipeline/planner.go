@@ -66,9 +66,13 @@ func (p *Planner) shardsForWorker() []int {
 	}
 	sort.Ints(allIDs)
 
+	// Owns() generalizes per-worker round-robin to the DDP rank dimension
+	// (feature F2). With WorldSize<=1 it is exactly i%NumWorkers==WorkerID, so
+	// the non-distributed path is unchanged.
+	dist := NewDistributer(p.cfg)
 	var mine []int
 	for i, id := range allIDs {
-		if i%p.cfg.NumWorkers == p.cfg.WorkerID {
+		if dist.Owns(i) {
 			mine = append(mine, id)
 		}
 	}

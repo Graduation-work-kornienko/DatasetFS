@@ -25,4 +25,4 @@ loaders: [imagefolder, webdataset, datasetfs]
 # Smoke runs skip the cache drop (faster + doesn't require sudo).
 drop_page_cache_between_cells: false
 
-daemon_binary: bin/fuse_daemon
+daemon_binary: bin/datasetfs

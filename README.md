@@ -3,7 +3,7 @@ File System, uses FUSE for easy file reading andmodification, and shared memory 
 
 ## Инструкция по запуску
 
-1) Запустить файловую систему - `go run ./cmd/fuse_daemon/main.go`
+1) Запустить файловую систему - `go run ./cmd/datasetfs daemon`
 2) Запустить скрипт тестирования - `python main.py`
 
 ## Подробнее про скрипт тестирования

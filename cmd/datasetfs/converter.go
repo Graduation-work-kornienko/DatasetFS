@@ -11,55 +11,57 @@ import (
 
 	"github.com/spf13/cobra"
 
-	// Import the parquet package to ensure it's included in the build
+	// Import the parquet package to ensure it's included in the build.
 	_ "github.com/parquet-go/parquet-go"
 )
 
+// sourceDir/targetDir back the converter flags. They are package-level so the
+// webdataset test can drive ParseWebDataset directly without a cobra invocation.
 var (
-	rootCmd = &cobra.Command{
-		Use:   "datasetconverter",
-		Short: "Tool to convert other datasets to DatasetFS format",
-		Long:  "Tool to convert many files(or WebDataset) to DatasetFS format",
+	sourceDir string
+	targetDir string
+)
+
+// newConverterCmd builds the `converter` parent command grouping the format
+// converters (dataset-folder, webdataset, convert-manifest).
+func newConverterCmd() *cobra.Command {
+	converterCmd := &cobra.Command{
+		Use:   "converter",
+		Short: "Convert other dataset formats to DatasetFS format",
+		Long:  "Convert many files (or a WebDataset) to DatasetFS format",
 	}
 
-	datasetFolder = &cobra.Command{
+	datasetFolder := &cobra.Command{
 		Use:   "dataset-folder",
 		Short: "Convert a DatasetFolder format to DatasetFS format",
 		Long:  "Convert a DatasetFolder format to DatasetFS format",
 		RunE:  generateConvertCommand(ParseDatasetFolder),
 	}
+	datasetFolder.Flags().StringVarP(&sourceDir, "source", "s", "", "Source directory containing the dataset to convert")
+	datasetFolder.Flags().StringVarP(&targetDir, "target", "t", "", "Target directory for the DatasetFS output")
+	datasetFolder.MarkFlagRequired("source")
+	datasetFolder.MarkFlagRequired("target")
 
-	webDataset = &cobra.Command{
+	webDataset := &cobra.Command{
 		Use:   "webdataset",
 		Short: "Convert a Webdataset format to DatasetFS format",
 		Args:  cobra.ExactArgs(2),
 		RunE:  generateConvertCommand(ParseWebDataset),
 	}
 
-	convertManifest = &cobra.Command{
+	convertManifest := &cobra.Command{
 		Use:   "convert-manifest",
 		Short: "Convert a JSON manifest to Parquet format",
 		Long:  "Convert an existing JSON manifest to Parquet format for improved efficiency",
 		RunE:  convertManifestCmd,
 	}
-
-	sourceDir string
-	targetDir string
-)
-
-func init() {
-	datasetFolder.Flags().StringVarP(&sourceDir, "source", "s", "", "Source directory containing the dataset to convert")
-	datasetFolder.Flags().StringVarP(&targetDir, "target", "t", "", "Target directory for the DatasetFS output")
-	datasetFolder.MarkFlagRequired("source")
-	datasetFolder.MarkFlagRequired("target")
-
-	// Add flags for convert-manifest command
 	convertManifest.Flags().StringP("source", "s", "", "Source directory containing the JSON manifest to convert")
 	convertManifest.MarkFlagRequired("source")
 
-	rootCmd.AddCommand(datasetFolder)
-	rootCmd.AddCommand(webDataset)
-	rootCmd.AddCommand(convertManifest)
+	converterCmd.AddCommand(datasetFolder)
+	converterCmd.AddCommand(webDataset)
+	converterCmd.AddCommand(convertManifest)
+	return converterCmd
 }
 
 type parseFunc func(context.Context, *manager.MutationManager, string) error
@@ -86,12 +88,5 @@ func generateConvertCommand(f parseFunc) func(*cobra.Command, []string) error {
 
 		fmt.Printf("Successfully converted dataset from %s to %s\n", sourceDir, targetDir)
 		return nil
-	}
-}
-
-func main() {
-	err := rootCmd.Execute()
-	if err != nil {
-		os.Exit(1)
 	}
 }

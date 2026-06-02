@@ -238,7 +238,7 @@ def run_comparison():
     plt.show()
 
 if __name__ == "__main__":
-    WDS_PATTERN = "cmd/dataset_converter/publaynet-train-{000000..000001}.tar"
+    WDS_PATTERN = "testdata/publaynet-train-{000000..000001}.tar"
 
     import glob
     files = glob.glob(WDS_PATTERN.replace("{000000..000001}.tar", "*.tar"))

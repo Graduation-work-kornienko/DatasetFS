@@ -55,6 +55,12 @@ type WorkerConfig struct {
 	SlotStart  int
 	SlotEnd    int
 	PipePath   string
+	// Rank/WorldSize describe this reader's place in a distributed (DDP) job
+	// (feature F2). Default (Rank 0, WorldSize 0/1) = single-process: the
+	// Distributer collapses to plain per-worker sharding. Set only when the
+	// client sends a `distributed` block to /initialize_loading.
+	Rank      int
+	WorldSize int
 	// Seed: nil = non-deterministic (global rand). Otherwise the master seed
 	// from /initialize_loading; each pipeline derives planner+dealer RNGs from
 	// it via (Seed, WorkerID) so different workers get independent streams.

@@ -114,7 +114,7 @@ Python: pipe.readline → JSON.parse → np.frombuffer(slot[off:off+size], uint8
 
 - [internal/pipeline/decoder.go](../../internal/pipeline/decoder.go) — новый стейдж
 - [internal/pipeline/pipeline.go](../../internal/pipeline/pipeline.go) — `DecodeMode`, `DecodeConfig`, опциональный wire-in декодера
-- [internal/ipc/startup_server.go](../../internal/ipc/startup_server.go) — парсинг `decode` в `/initialize_loading`
+- [internal/control/server.go](../../internal/control/server.go) — парсинг `decode` в `/initialize_loading`
 - [clients/python/dataset_fs.py](../../clients/python/dataset_fs.py) — `decode_mode`/`decode_image_size` + новая ветка в `__iter__`
 - [benchmarks/datasetfs_bench/loaders/datasetfs.py](../../benchmarks/datasetfs_bench/loaders/datasetfs.py) — поддержка mode в loader-spec
 - [benchmarks/datasetfs_bench/configs/decode_compare.yaml](../../benchmarks/datasetfs_bench/configs/decode_compare.yaml) — A/B sweep config

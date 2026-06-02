@@ -5,15 +5,15 @@ import (
 	"log"
 	"time"
 
+	"github.com/Graduation-work-kornienko/DatasetFS/internal/control"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
-	"github.com/Graduation-work-kornienko/DatasetFS/internal/ipc"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/manager"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/vacuum"
 )
 
 // autoVacuumConfig configures the in-daemon background vacuumer. It replaces the
 // former standalone cmd/background_vacuum program: running it inside the daemon
-// lets it coordinate with the loading pipeline (via ipc maintenance) and with
+// lets it coordinate with the loading pipeline (via control maintenance) and with
 // FUSE mutations (via MutationManager.WithExclusive) instead of shelling out.
 type autoVacuumConfig struct {
 	root      string
@@ -49,7 +49,7 @@ func runAutoVacuum(ctx context.Context, cfg autoVacuumConfig, coreIdx *index.Cor
 			}
 
 			// Reserve the dataset; skip this tick if a pipeline is running.
-			if !ipc.BeginMaintenance() {
+			if !control.BeginMaintenance() {
 				log.Printf("[auto-vacuum] fragmentation %.1f%% but a session is active — skipping", frag*100)
 				continue
 			}
@@ -82,7 +82,7 @@ func runAutoVacuum(ctx context.Context, cfg autoVacuumConfig, coreIdx *index.Cor
 				return nil
 			})
 
-			ipc.EndMaintenance()
+			control.EndMaintenance()
 			if err != nil {
 				log.Printf("[auto-vacuum] failed: %v", err)
 			} else {

@@ -40,12 +40,14 @@ def data_root(repo_root: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
-def daemon_binary(repo_root: Path) -> Path:
-    binary = repo_root / "bin" / "fuse_daemon"
+def datasetfs_binary(repo_root: Path) -> Path:
+    """Build the single datasetfs binary (daemon | vacuum | converter)."""
+    binary = repo_root / "bin" / "datasetfs"
     binary.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\n[fixture] building daemon → {binary}", flush=True)
-    # Daemon needs cgo for libjpeg-turbo (see internal/pipeline/decoder_libjpeg.go).
-    # Mirror Makefile's CGO_ENV so tests build the same binary `make` would.
+    print(f"\n[fixture] building datasetfs → {binary}", flush=True)
+    # The binary needs cgo for libjpeg-turbo (see internal/pipeline/decoder_libjpeg.go)
+    # — the converter/vacuum subcommands share the daemon's binary, which pulls in
+    # internal/pipeline. Mirror Makefile's CGO_ENV so tests build what `make` would.
     env = {
         **os.environ,
         "CGO_ENABLED": "1",
@@ -55,7 +57,7 @@ def daemon_binary(repo_root: Path) -> Path:
         ),
     }
     subprocess.run(
-        ["go", "build", "-o", str(binary), "./cmd/fuse_daemon"],
+        ["go", "build", "-o", str(binary), "./cmd/datasetfs"],
         cwd=repo_root,
         env=env,
         check=True,
@@ -64,16 +66,13 @@ def daemon_binary(repo_root: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
-def converter_binary(repo_root: Path) -> Path:
-    binary = repo_root / "bin" / "dataset_converter"
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\n[fixture] building converter → {binary}", flush=True)
-    subprocess.run(
-        ["go", "build", "-o", str(binary), "./cmd/dataset_converter"],
-        cwd=repo_root,
-        check=True,
-    )
-    return binary
+def daemon_binary(datasetfs_binary: Path) -> Path:
+    return datasetfs_binary
+
+
+@pytest.fixture(scope="session")
+def converter_binary(datasetfs_binary: Path) -> Path:
+    return datasetfs_binary
 
 
 def _prepare_dataset(ds_def, repo_root: Path, data_root: Path) -> dict[str, Path]:
@@ -187,7 +186,7 @@ def _wait_for_healthz(url: str, timeout: float = 30.0) -> None:
 
 
 class DaemonManager:
-    """Owns a fuse_daemon subprocess. Supports restart-in-place for tests that
+    """Owns a datasetfs daemon subprocess. Supports restart-in-place for tests that
     iterate multiple times, where leaving the previous session's dealers
     blocked on the same FIFO would risk cross-session interleave."""
 
@@ -211,7 +210,7 @@ class DaemonManager:
         else:
             mount_args = ["--no-mount"]
         print(
-            f"\n[daemon] start: {self.binary} {' '.join(mount_args)} --root {self.root_path}",
+            f"\n[daemon] start: {self.binary} daemon {' '.join(mount_args)} --root {self.root_path}",
             flush=True,
         )
         log_dir = self.cwd / "runs"
@@ -219,7 +218,7 @@ class DaemonManager:
         self._log_path = log_dir / f"daemon-{int(time.time()*1000)}.log"
         self._log_file = open(self._log_path, "w")
         self._proc = subprocess.Popen(
-            [str(self.binary), *mount_args, "--root", str(self.root_path)],
+            [str(self.binary), "daemon", *mount_args, "--root", str(self.root_path)],
             cwd=self.cwd,
             stdout=self._log_file,
             stderr=subprocess.STDOUT,

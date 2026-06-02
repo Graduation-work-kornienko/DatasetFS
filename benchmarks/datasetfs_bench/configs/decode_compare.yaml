@@ -32,4 +32,4 @@ loaders: [datasetfs]
 
 drop_page_cache_between_cells: true
 
-daemon_binary: bin/fuse_daemon
+daemon_binary: bin/datasetfs
