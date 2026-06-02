@@ -77,9 +77,12 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 			globalSlotStartOffset := int64(job.SlotID * shm.SlotSize)
 
 			for _, meta := range job.Shard.Objects {
+				// Snapshot Objects are already live-filtered (see
+				// CoreIndex.materializeLocked); the Deleted guard is kept as a
+				// cheap invariant check.
 				if !meta.Deleted {
 					localMeta := Metadata{
-						Metadata: *meta,
+						Metadata: meta,
 						SlotID:   job.SlotID,
 					}
 

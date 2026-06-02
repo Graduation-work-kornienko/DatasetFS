@@ -13,6 +13,10 @@ const (
 	Base ShardType = "base"
 )
 
+// DeltaShardID is the reserved shard number for the append-only delta shard that
+// receives mutations (added files) before vacuum folds them into base shards.
+const DeltaShardID = -1
+
 type Shard struct {
 	Number    int       `json:"-"`          // Number of shard
 	Type      ShardType `json:"type"`       // Type of shard: base, delta
@@ -38,12 +42,20 @@ type CoreIndex struct {
 	LastShard int                  // Number of last shard
 	FileMap   map[string]*Metadata // For FUSE and Mutation: object by object path
 	ShardMap  map[int]*Shard       // For Planner: Shard by name
+
+	// MVCC state (feature F1, see snapshot.go). gen is bumped by every mutation;
+	// cachedSnap memoizes the immutable view of the current generation; pinned
+	// refcounts the generations held by live loading sessions. All guarded by Mu.
+	gen        uint64
+	cachedSnap *Snapshot
+	pinned     map[uint64]int
 }
 
 func NewIndex() *CoreIndex {
 	return &CoreIndex{
 		ShardMap: make(map[int]*Shard),
 		FileMap:  make(map[string]*Metadata),
+		pinned:   make(map[uint64]int),
 	}
 }
 
@@ -60,6 +72,7 @@ func (i *CoreIndex) MarkDeleted(filename string) error {
 		return fmt.Errorf("no such file %s", filename)
 	}
 	i.FileMap[filename].Deleted = true
+	i.bumpGen()
 	return nil
 }
 
@@ -73,6 +86,7 @@ func (i *CoreIndex) MarkDeletedTolerant(filename string) {
 	defer i.Mu.Unlock()
 	if m, ok := i.FileMap[filename]; ok {
 		m.Deleted = true
+		i.bumpGen()
 	}
 }
 
@@ -84,6 +98,7 @@ func (i *CoreIndex) AddFile(m *Metadata) error {
 	}
 	i.ShardMap[m.ShardID].Objects = append(i.ShardMap[m.ShardID].Objects, m)
 	i.FileMap[m.Path] = m
+	i.bumpGen()
 	return nil
 }
 
@@ -115,6 +130,7 @@ func (i *CoreIndex) AppendShard(shard *Shard) error {
 	for _, e := range shard.Objects {
 		i.FileMap[e.Path] = e
 	}
+	i.bumpGen()
 	return nil
 }
 
@@ -143,4 +159,5 @@ func (i *CoreIndex) Reload(m *Manifest) {
 			sh.Objects = append(sh.Objects, &mc)
 		}
 	}
+	i.bumpGen()
 }

@@ -139,6 +139,39 @@ def _cleanup_tmp_files() -> None:
             pass
 
 
+def _force_unmount(mount_point: Path) -> None:
+    """Best-effort unmount of a (possibly stale) FUSE mountpoint. No-op if not
+    mounted. macOS: try `umount`, then `diskutil unmount force`."""
+    try:
+        if not os.path.ismount(mount_point):
+            return
+    except OSError:
+        # ismount can raise on a dead/half-unmounted FUSE node — try to clear it.
+        pass
+    for cmd in (["umount", str(mount_point)], ["diskutil", "unmount", "force", str(mount_point)]):
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=15)
+        except Exception:
+            pass
+        try:
+            if not os.path.ismount(mount_point):
+                return
+        except OSError:
+            return
+
+
+def _wait_for_mount(mount_point: Path, timeout: float = 30.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if os.path.ismount(mount_point):
+                return
+        except OSError:
+            pass
+        time.sleep(0.1)
+    raise RuntimeError(f"FUSE mount {mount_point} did not appear within {timeout}s")
+
+
 def _wait_for_healthz(url: str, timeout: float = 30.0) -> None:
     deadline = time.time() + timeout
     last_err: Exception | None = None
@@ -158,17 +191,27 @@ class DaemonManager:
     iterate multiple times, where leaving the previous session's dealers
     blocked on the same FIFO would risk cross-session interleave."""
 
-    def __init__(self, binary: Path, root_path: Path, cwd: Path, url: str = "http://localhost:51409"):
+    def __init__(self, binary: Path, root_path: Path, cwd: Path, url: str = "http://localhost:51409",
+                 mount_point: Path | None = None):
         self.binary = binary
         self.root_path = root_path
         self.cwd = cwd
         self.url = url
+        # mount_point set → run the real FUSE mount (rm/cp drive mutations) instead
+        # of --no-mount. Used by the snapshot-consistency test (feature F1).
+        self.mount_point = mount_point
         self._proc: subprocess.Popen | None = None
 
     def start(self) -> None:
         _cleanup_tmp_files()
+        if self.mount_point is not None:
+            _force_unmount(self.mount_point)  # clear any stale mount from a prior run
+            self.mount_point.mkdir(parents=True, exist_ok=True)
+            mount_args = ["--mount", str(self.mount_point)]
+        else:
+            mount_args = ["--no-mount"]
         print(
-            f"\n[daemon] start: {self.binary} --no-mount --root {self.root_path}",
+            f"\n[daemon] start: {self.binary} {' '.join(mount_args)} --root {self.root_path}",
             flush=True,
         )
         log_dir = self.cwd / "runs"
@@ -176,13 +219,15 @@ class DaemonManager:
         self._log_path = log_dir / f"daemon-{int(time.time()*1000)}.log"
         self._log_file = open(self._log_path, "w")
         self._proc = subprocess.Popen(
-            [str(self.binary), "--no-mount", "--root", str(self.root_path)],
+            [str(self.binary), *mount_args, "--root", str(self.root_path)],
             cwd=self.cwd,
             stdout=self._log_file,
             stderr=subprocess.STDOUT,
             preexec_fn=os.setsid if hasattr(os, "setsid") else None,
         )
         _wait_for_healthz(self.url, timeout=30.0)
+        if self.mount_point is not None:
+            _wait_for_mount(self.mount_point, timeout=30.0)
         print(f"[daemon] ready (log: {self._log_path})", flush=True)
 
     def stop(self) -> None:
@@ -211,6 +256,9 @@ class DaemonManager:
         self._proc = None
         if hasattr(self, "_log_file"):
             self._log_file.close()
+        # SIGTERM makes the daemon unmount itself; force-clear if it didn't.
+        if self.mount_point is not None:
+            _force_unmount(self.mount_point)
         _cleanup_tmp_files()
 
     def restart(self) -> None:
@@ -250,6 +298,42 @@ def daemon_imagewoof(daemon_binary: Path, imagewoof_prepared: dict[str, Path], r
     manager.start()
     try:
         yield manager
+    finally:
+        manager.stop()
+
+
+@pytest.fixture
+def flat_mounted_daemon(daemon_binary: Path, repo_root: Path, tmp_path: Path):
+    """A daemon serving an initially-empty *flat* dataset over a real FUSE mount.
+
+    Files are added/removed by writing/removing bare-name files on the mountpoint,
+    which drives MutationManager.AddDeltaFile/DeleteFile — exactly the online-
+    learning path feature F1 must keep snapshot-consistent. Flat keys (no '/')
+    sidestep the vfs's flat-namespace limitation. Skips if the FUSE mount can't be
+    established (e.g. macFUSE absent). Yields (manager, mount_point: Path)."""
+    import json as _json
+
+    ds_root = tmp_path / "flat_ds"
+    ds_root.mkdir(parents=True, exist_ok=True)
+    # Minimal empty manifest: 0 base shards, 0 files. The daemon seeds the delta
+    # shard placeholder itself; all data arrives later via FUSE writes.
+    (ds_root / "metadata.jsonl").write_text(
+        _json.dumps({"version": "1.0", "shards_meta": {}, "files": {}})
+    )
+    mount_point = tmp_path / "mnt"
+    manager = DaemonManager(
+        binary=daemon_binary,
+        root_path=ds_root,
+        cwd=repo_root,
+        mount_point=mount_point,
+    )
+    try:
+        manager.start()
+    except Exception as e:  # mount failed → environment can't run this test
+        manager.stop()
+        pytest.skip(f"could not start mounted daemon (FUSE unavailable?): {e}")
+    try:
+        yield manager, mount_point
     finally:
         manager.stop()
 

@@ -38,6 +38,11 @@ type SlotMeta struct {
 
 type Batch struct {
 	Items []*Metadata `json:"items"`
+	// Generation is the snapshot generation this batch was served from (feature
+	// F1). It is constant for every batch of one epoch (all workers share the
+	// session's pinned snapshot); the Python client asserts this to detect any
+	// torn read across a concurrent mutation.
+	Generation uint64 `json:"generation"`
 }
 
 func DealerWorker(
@@ -46,6 +51,7 @@ func DealerWorker(
 	allocator *shm.Allocator,
 	pipePath string,
 	rng *rand.Rand,
+	gen uint64,
 ) {
 	// WindowSize bounds how many SlotMetas we *may* merge for one emit cycle
 	// (for cross-shard shuffling), but we never BLOCK waiting to reach it —
@@ -91,7 +97,7 @@ func DealerWorker(
 		case slotMeta, ok := <-metaIn:
 			if !ok {
 				log.Printf("[Dealer] Канал закрыт, эпоха завершена")
-				encoder.Encode(Batch{Items: []*Metadata{}})
+				encoder.Encode(Batch{Items: []*Metadata{}, Generation: gen})
 				metrics.EpochsCompletedTotal.Add(1)
 				return
 			}
@@ -129,7 +135,7 @@ func DealerWorker(
 				end = len(shadowPool)
 			}
 
-			batch := Batch{Items: shadowPool[i:end]}
+			batch := Batch{Items: shadowPool[i:end], Generation: gen}
 			if err := encoder.Encode(batch); err != nil {
 				return
 			}
@@ -139,7 +145,7 @@ func DealerWorker(
 
 		if isEOF {
 			log.Printf("[Dealer] Отправили команду окончания")
-			encoder.Encode(Batch{Items: []*Metadata{}})
+			encoder.Encode(Batch{Items: []*Metadata{}, Generation: gen})
 			metrics.EpochsCompletedTotal.Add(1)
 			return
 		}

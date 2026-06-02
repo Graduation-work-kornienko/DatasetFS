@@ -134,7 +134,7 @@ type Pipeline struct {
 }
 
 func NewPipeline(
-	coreIdx *index.CoreIndex,
+	snap *index.Snapshot,
 	strg *storage.Storage,
 	alloc *shm.Allocator,
 	cfg WorkerConfig,
@@ -144,7 +144,7 @@ func NewPipeline(
 	freeSlotChan := make(chan int, 100)
 	metaChan := make(chan *SlotMeta, 100)
 
-	planner := NewPlanner(coreIdx, alloc, loaderChan, freeSlotChan, cfg)
+	planner := NewPlanner(snap, alloc, loaderChan, freeSlotChan, cfg)
 	loader := NewBackgroundLoader(strg, alloc, loaderChan, metaChan, freeSlotChan)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -174,7 +174,7 @@ func NewPipeline(
 		p.goTracked(func() { dec.Launch(ctx) })
 		dealerIn = decodedChan
 	}
-	p.goTracked(func() { DealerWorker(ctx, dealerIn, alloc, cfg.PipePath, cfg.DealerRand()) })
+	p.goTracked(func() { DealerWorker(ctx, dealerIn, alloc, cfg.PipePath, cfg.DealerRand(), snap.Gen) })
 
 	return p
 }

@@ -66,19 +66,20 @@ func TestPipePath(t *testing.T) {
 	}
 }
 
-// mockCoreIndex builds a CoreIndex with N shards (IDs 0..N-1).
-func mockCoreIndex(numShards int) *index.CoreIndex {
+// mockSnapshot builds a pinned Snapshot with N base shards (IDs 0..N-1), as a
+// planner would receive from CoreIndex.Pin().
+func mockSnapshot(numShards int) *index.Snapshot {
 	ci := index.NewIndex()
 	for i := 0; i < numShards; i++ {
 		ci.ShardMap[i] = &index.Shard{Number: i, Type: index.Base, TotalSize: 1000}
 	}
-	return ci
+	return ci.Pin()
 }
 
 func TestShardsForWorker_DeterministicWithSeed(t *testing.T) {
 	// Two planners with identical (seed, cfg) must produce identical shard orderings.
 	seed := uint64(42)
-	ci := mockCoreIndex(11)
+	snap := mockSnapshot(11)
 
 	cfg := WorkerConfig{
 		WorkerID:   1,
@@ -88,8 +89,8 @@ func TestShardsForWorker_DeterministicWithSeed(t *testing.T) {
 		Seed:       &seed,
 	}
 
-	p1 := NewPlanner(ci, nil, nil, nil, cfg)
-	p2 := NewPlanner(ci, nil, nil, nil, cfg)
+	p1 := NewPlanner(snap, nil, nil, nil, cfg)
+	p2 := NewPlanner(snap, nil, nil, nil, cfg)
 
 	out1 := p1.shardsForWorker()
 	out2 := p2.shardsForWorker()
@@ -105,15 +106,15 @@ func TestShardsForWorker_DeterministicWithSeed(t *testing.T) {
 
 func TestShardsForWorker_DifferentSeedsDifferentOrder(t *testing.T) {
 	// Different seeds should (with high probability) produce different orderings.
-	ci := mockCoreIndex(11)
+	snap := mockSnapshot(11)
 	s1 := uint64(1)
 	s2 := uint64(2)
 
 	cfg1 := WorkerConfig{WorkerID: 0, NumWorkers: 1, SlotStart: 0, SlotEnd: 9, Seed: &s1}
 	cfg2 := WorkerConfig{WorkerID: 0, NumWorkers: 1, SlotStart: 0, SlotEnd: 9, Seed: &s2}
 
-	out1 := NewPlanner(ci, nil, nil, nil, cfg1).shardsForWorker()
-	out2 := NewPlanner(ci, nil, nil, nil, cfg2).shardsForWorker()
+	out1 := NewPlanner(snap, nil, nil, nil, cfg1).shardsForWorker()
+	out2 := NewPlanner(snap, nil, nil, nil, cfg2).shardsForWorker()
 
 	if reflect.DeepEqual(out1, out2) {
 		t.Fatalf("different seeds produced identical order — RNG not actually used: %v", out1)

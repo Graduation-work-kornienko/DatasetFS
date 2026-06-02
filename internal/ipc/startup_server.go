@@ -33,11 +33,19 @@ type decodeOption struct {
 type session struct {
 	alloc     *shm.Allocator
 	pipelines []*pipeline.Pipeline
+	// coreIdx + snap implement the per-session MVCC pin (feature F1): the whole
+	// session reads one immutable generation, released on stop so the vacuum
+	// safepoint (CoreIndex.MinPinnedGen) advances.
+	coreIdx *index.CoreIndex
+	snap    *index.Snapshot
 }
 
 func (s *session) stop() {
 	for _, p := range s.pipelines {
 		p.Stop()
+	}
+	if s.coreIdx != nil {
+		s.coreIdx.Unpin(s.snap)
 	}
 	if s.alloc != nil {
 		s.alloc.Close()
@@ -142,7 +150,10 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 			return
 		}
 
-		s := &session{alloc: alloc}
+		// Pin one immutable snapshot for the whole session so every worker reads
+		// the same generation even if a mutation lands mid-setup (feature F1).
+		snap := coreIdx.Pin()
+		s := &session{alloc: alloc, coreIdx: coreIdx, snap: snap}
 		for wID := 0; wID < numWorkers; wID++ {
 			start, end := pipeline.SlotRange(wID, numWorkers)
 			cfg := pipeline.WorkerConfig{
@@ -154,7 +165,7 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 				Seed:       seed,
 				Decode:     decodeCfg,
 			}
-			p := pipeline.NewPipeline(coreIdx, strg, alloc, cfg)
+			p := pipeline.NewPipeline(snap, strg, alloc, cfg)
 			p.Initiate()
 			s.pipelines = append(s.pipelines, p)
 		}
@@ -164,6 +175,7 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"num_workers": numWorkers,
+			"generation":  snap.Gen,
 			"decode": map[string]any{
 				"mode":        string(decodeCfg.Mode),
 				"image_size":  decodeCfg.ImageSize,

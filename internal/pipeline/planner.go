@@ -22,7 +22,7 @@ const refCountPollInterval = 2 * time.Millisecond
 type Planner struct {
 	cfg          WorkerConfig
 	rng          *rand.Rand // nil = use global rand (non-deterministic)
-	coreIndex    *index.CoreIndex
+	snap         *index.Snapshot
 	allocator    *shm.Allocator
 	loaderChan   chan *LoadJob
 	freeSlotChan chan int
@@ -31,14 +31,17 @@ type Planner struct {
 type LoadJob struct {
 	ShardID int
 	SlotID  int
-	Shard   *index.Shard
+	Shard   *index.ShardSnap
 }
 
-func NewPlanner(idx *index.CoreIndex, alloc *shm.Allocator, loaderChan chan *LoadJob, freeSlots chan int, cfg WorkerConfig) *Planner {
+// NewPlanner builds a planner bound to an immutable Snapshot pinned for this
+// session (feature F1). The planner reads only the snapshot, so concurrent
+// mutations (which publish a new generation) cannot change what this epoch sees.
+func NewPlanner(snap *index.Snapshot, alloc *shm.Allocator, loaderChan chan *LoadJob, freeSlots chan int, cfg WorkerConfig) *Planner {
 	return &Planner{
 		cfg:          cfg,
 		rng:          cfg.PlannerRand(),
-		coreIndex:    idx,
+		snap:         snap,
 		allocator:    alloc,
 		loaderChan:   loaderChan,
 		freeSlotChan: freeSlots,
@@ -49,10 +52,14 @@ func NewPlanner(idx *index.CoreIndex, alloc *shm.Allocator, loaderChan chan *Loa
 // order. Sharding is by index in the sorted shard ID list (not by raw ID),
 // since ShardMap keys can be sparse.
 func (p *Planner) shardsForWorker() []int {
-	shards := p.coreIndex.AllShards()
+	shards := p.snap.Shards
 	allIDs := make([]int, 0, len(shards))
-	for id := range shards {
-		if id == -1 {
+	for id, ss := range shards {
+		// The delta shard is served only once it actually holds added files
+		// (a pinned generation with no mutations has an empty delta). Base
+		// shards are always scheduled, even if fully deleted — the loader frees
+		// the slot when no live objects remain.
+		if id == index.DeltaShardID && len(ss.Objects) == 0 {
 			continue
 		}
 		allIDs = append(allIDs, id)
@@ -75,7 +82,7 @@ func (p *Planner) shardsForWorker() []int {
 }
 
 func (p *Planner) Initiate(ctx context.Context, wg *sync.WaitGroup) error {
-	shards := p.coreIndex.AllShards()
+	shards := p.snap.Shards
 	myShardIDs := p.shardsForWorker()
 	log.Printf("[Planner w=%d] %d shards assigned", p.cfg.WorkerID, len(myShardIDs))
 

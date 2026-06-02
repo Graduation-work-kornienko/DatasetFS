@@ -177,6 +177,11 @@ class DatasetFS(IterableDataset):
                         print(f"[Python worker={worker_id}] Датасет полностью прочитан (Пустой батч). Конец эпохи.")
                         break
 
+                    # Snapshot generation this batch was served from (feature F1).
+                    # Constant for the whole epoch across all workers; a test
+                    # asserts this to detect torn reads under concurrent mutation.
+                    batch_generation = batch_meta.get("generation")
+
                     for item in batch_meta["items"]:
                         slot_id = item["slot_id"]
                         offset = item["offset"]
@@ -211,6 +216,9 @@ class DatasetFS(IterableDataset):
                             continue
 
                         result = {"image": tensor}
+
+                        if batch_generation is not None:
+                            result["dfs_generation"] = batch_generation
 
                         if "path" in item:
                             result["path"] = item["path"]
