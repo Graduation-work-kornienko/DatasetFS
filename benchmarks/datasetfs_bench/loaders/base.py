@@ -15,6 +15,14 @@ from typing import Any, ClassVar
 from torch.utils.data import DataLoader
 
 
+class FormatUnavailable(Exception):
+    """Raised by a loader's `setup()` when its format cannot run in this
+    environment (e.g., FFCV on macOS) or its prepared data is missing. The
+    runner catches this and SKIPS the cell instead of aborting the whole run —
+    the format×modality matrix is intentionally sparse (HANDOFF: log the gap,
+    don't pretend it was covered)."""
+
+
 class BaseLoader(ABC):
     """Wraps one storage format as a uniform PyTorch DataLoader factory.
 

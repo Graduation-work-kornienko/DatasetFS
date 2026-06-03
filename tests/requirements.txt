@@ -11,3 +11,9 @@ pyarrow>=14
 numpy>=1.24
 scipy>=1.10
 soundfile>=0.12
+# Format-matrix benchmark (G1/G8/G12): extra storage formats + video decode.
+lmdb>=1.4          # LMDB key-value store loader
+h5py>=3.10         # HDF5 loader
+tfrecord>=1.14     # TFRecord read/write WITHOUT the heavy tensorflow dep
+crc32c>=2.3        # tfrecord record-integrity hashing
+av>=11             # PyAV video decode (Wave 3, short-video modality)

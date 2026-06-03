@@ -1,0 +1,19 @@
+# Linux-only benchmark extras — NOT installable on macOS.
+#
+# FFCV is a Linux-only, compiled dataloader. It needs system libraries that
+# have no macOS wheels and do not coexist cleanly with the Homebrew toolchain:
+#   - libturbojpeg (pkg-config: libturbojpeg)
+#   - opencv (pkg-config: opencv4)
+#   - a working numba/llvmlite for the JIT pipeline
+#
+# On Debian/Ubuntu Linux+GPU benchmark hosts:
+#   sudo apt-get install -y libturbojpeg0-dev pkg-config libopencv-dev
+#   pip install -r tests/requirements.txt -r requirements-linux.txt
+#
+# The FFCV loader (benchmarks/.../loaders/ffcv_loader.py) and its prep step
+# (scripts/datasets/prepare_formats.py::prepare_ffcv) auto-skip on darwin and
+# only do real work where this file is installed. See requirements-linux notes
+# and HANDOFF.md "Real numbers on Linux + GPU".
+ffcv>=1.0
+opencv-python>=4.8
+numba>=0.58

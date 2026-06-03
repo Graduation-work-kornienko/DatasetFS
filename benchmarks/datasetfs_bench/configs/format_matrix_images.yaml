@@ -1,0 +1,67 @@
+# Format matrix (thesis graph G1) — images.
+#
+# Same Imagenette files, stored in every format we support, compared on
+# throughput. SimpleCNN keeps training LOADER-BOUND so the storage/decode tax of
+# each format dominates runtime (a heavy model would mask it behind compute).
+# `synthetic` is the compute-only ceiling; the gap to it is each format's tax.
+# `ffcv` auto-skips on macOS (Linux-only) — the runner logs SKIP and moves on.
+#
+# Metrics discipline (HANDOFF): hypothesis = "DFS is competitive/faster in the
+# loader-bound regime because server-side decode + zero-copy SHM remove PIL and
+# copies from the Python critical path; byte-store formats (LMDB/HDF5/TFRecord)
+# win on no-per-file-open + page-cache locality vs ImageFolder." The full metric
+# set (sps, TTFB, stall%, fetch p50/95/99, sys CPU/RSS/disk, DFS /metrics) is
+# captured per cell by the runner.
+
+dataset:
+  name: imagenette
+  imagefolder: data/formats/imagenette/imagefolder
+  webdataset: data/formats/imagenette/webdataset
+  datasetfs: data/formats/imagenette/datasetfs
+  huggingface: data/formats/imagenette/huggingface
+  lmdb: data/formats/imagenette/lmdb
+  hdf5: data/formats/imagenette/hdf5
+  tfrecord: data/formats/imagenette/tfrecord
+  ffcv: data/formats/imagenette/ffcv
+
+model: simplecnn
+batch_size: 64
+num_workers: 4
+image_size: 96
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 80
+# Drop the first N batches of each measured epoch from the steady-state
+# throughput window — excludes the one-time DataLoader worker-spawn + pipeline
+# priming ramp UNIFORMLY across formats (map-style spawn in iter(), iterable in
+# first next()). Without this the bar chart penalizes IterableDataset loaders
+# (DatasetFS/WebDataset/TFRecord) for spawn the others hide. See train/loop.py.
+warmup_batches: 10
+
+seeds: [0, 1, 2]
+# DatasetFS appears TWICE on purpose (two distinct bars):
+#   - datasetfs      : raw mode, Python-side PIL decode — apples-to-apples vs the
+#                      other byte-store formats, all of which decode in Python.
+#   - datasetfs-rgb  : server-side rgb_uint8 + parallel decode (opt 01/02) — DFS's
+#                      unique edge; the daemon decodes off the Python critical path.
+# The gap between the two bars IS the server-side-decode win, shown in-context
+# against every competing format (this is the G1+G2 headline folded together).
+loaders:
+  - imagefolder
+  - webdataset
+  - datasetfs
+  - {format: datasetfs, name: datasetfs-rgb, dfs_decode_mode: rgb_uint8, dfs_decode_parallelism: 0}
+  - huggingface
+  - lmdb
+  - hdf5
+  - tfrecord
+  - ffcv
+  - synthetic
+
+# synthetic compute-ceiling epoch length (no I/O).
+synthetic_samples: 10000
+
+drop_page_cache_between_cells: false
+
+daemon_binary: bin/datasetfs

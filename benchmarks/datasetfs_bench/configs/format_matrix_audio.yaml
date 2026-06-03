@@ -1,0 +1,38 @@
+# Format matrix (thesis graph G1 + G8) — audio (Speech Commands V2).
+#
+# Same .wav files across every byte-store format; modality=audio routes ALL
+# loaders through soundfile → log-mel (1, 32, T) so the model sees identical
+# inputs. model=simplecnn_audio (1-channel) keeps it loader-bound. Audio decode
+# is cheap (unlike PIL), so this also stresses the daemon→Python transport that
+# opt 03 optimized — the format gap here is storage + transport, not decode.
+#
+# Sparse cells (HANDOFF: log, don't fake): huggingface stores an Image() column
+# (image-only prep) → excluded; ffcv/synthetic are image-only → excluded.
+
+dataset:
+  name: speech_commands
+  imagefolder: data/formats/speech_commands/imagefolder
+  webdataset: data/formats/speech_commands/webdataset
+  datasetfs: data/formats/speech_commands/datasetfs
+  lmdb: data/formats/speech_commands/lmdb
+  hdf5: data/formats/speech_commands/hdf5
+  tfrecord: data/formats/speech_commands/tfrecord
+
+modality: audio
+model: simplecnn_audio
+batch_size: 64
+num_workers: 4
+image_size: 96          # unused for audio (mel shape fixed by n_mels/target)
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 120
+# See format_matrix_images.yaml — drop spawn/priming ramp from steady throughput.
+warmup_batches: 10
+
+seeds: [0, 1, 2]
+loaders: [imagefolder, webdataset, datasetfs, lmdb, hdf5, tfrecord]
+
+drop_page_cache_between_cells: false
+
+daemon_binary: bin/datasetfs

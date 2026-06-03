@@ -13,32 +13,47 @@ from ..metrics.training import EpochStats, TimedLoaderIter
 
 def train_one_epoch(
     model: nn.Module,
-    loader_iter,
+    loader,
     optim: torch.optim.Optimizer,
     loss_fn: Callable,
     epoch_idx: int,
     *,
     max_batches: int | None = None,
+    warmup_batches: int = 0,
 ) -> EpochStats:
     """Train for one epoch, returning timing stats.
 
-    `loader_iter`: an already-instantiated iterator over the DataLoader.
-    We wrap it to capture per-batch fetch latency.
+    `loader`: a DataLoader (NOT a pre-built iterator). We call `iter()` here,
+    INSIDE the timed region, so DataLoader worker-spawn cost is attributed
+    uniformly across formats — map-style loaders spawn during iter(), iterable
+    loaders during the first next(); measuring from before iter() keeps the
+    comparison fair (see EpochStats.steady_* for the rationale).
+
+    `warmup_batches`: number of leading batches excluded from the steady-state
+    throughput window (drops the one-time spawn + priming ramp). They are still
+    trained on and still counted in the whole-epoch wall number.
     """
     model.train()
-    timed = TimedLoaderIter(loader_iter)
+
+    t_start = time.perf_counter()
+    it = iter(loader)                       # worker spawn happens here/at first next()
+    timed = TimedLoaderIter(it)
 
     n_batches = 0
     n_samples = 0
     compute_times: list[float] = []
     losses: list[float] = []
 
-    t_start = time.perf_counter()
     time_to_first: float | None = None
+    t_steady_start: float | None = None
+    steady_n_samples = 0
 
     for batch_idx, (images, targets) in enumerate(timed):
         if time_to_first is None:
             time_to_first = time.perf_counter() - t_start
+        if batch_idx == warmup_batches:
+            # Steady window opens just before we process the first post-warmup batch.
+            t_steady_start = time.perf_counter()
 
         t_compute_start = time.perf_counter()
         optim.zero_grad()
@@ -51,11 +66,15 @@ def train_one_epoch(
         losses.append(float(loss.item()))
         n_batches += 1
         n_samples += images.shape[0]
+        if batch_idx >= warmup_batches:
+            steady_n_samples += images.shape[0]
 
         if max_batches is not None and n_batches >= max_batches:
             break
 
-    wall = time.perf_counter() - t_start
+    t_end = time.perf_counter()
+    wall = t_end - t_start
+    steady_wall = (t_end - t_steady_start) if t_steady_start is not None else 0.0
 
     return EpochStats(
         epoch=epoch_idx,
@@ -65,4 +84,6 @@ def train_one_epoch(
         time_to_first_batch=time_to_first or 0.0,
         fetch_latency_seconds=timed.fetch_latencies,
         compute_seconds=compute_times,
+        steady_n_samples=steady_n_samples,
+        steady_wall_seconds=steady_wall,
     )

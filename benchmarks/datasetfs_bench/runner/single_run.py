@@ -40,8 +40,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from benchmarks.datasetfs_bench.loaders.base import FormatUnavailable
 from benchmarks.datasetfs_bench.loaders.datasetfs import DatasetFSLoader
+from benchmarks.datasetfs_bench.loaders.ffcv_loader import FFCVLoader
+from benchmarks.datasetfs_bench.loaders.hdf5_loader import HDF5Loader
+from benchmarks.datasetfs_bench.loaders.hf_loader import HuggingFaceLoader
 from benchmarks.datasetfs_bench.loaders.imagefolder import ImageFolderLoader
+from benchmarks.datasetfs_bench.loaders.lmdb_loader import LMDBLoader
+from benchmarks.datasetfs_bench.loaders.synthetic import SyntheticLoader
+from benchmarks.datasetfs_bench.loaders.tfrecord_loader import TFRecordLoader
 from benchmarks.datasetfs_bench.loaders.webdataset_loader import WebDatasetLoader
 from benchmarks.datasetfs_bench.metrics import daemon as daemon_metrics
 from benchmarks.datasetfs_bench.metrics.system import SystemSampler
@@ -56,13 +63,56 @@ LOADER_CLASSES = {
     "datasetfs": DatasetFSLoader,
     "webdataset": WebDatasetLoader,
     "imagefolder": ImageFolderLoader,
+    # Format matrix (G1): same files, different storage engines.
+    "lmdb": LMDBLoader,
+    "hdf5": HDF5Loader,
+    "tfrecord": TFRecordLoader,
+    "huggingface": HuggingFaceLoader,
+    "ffcv": FFCVLoader,
+    "synthetic": SyntheticLoader,
 }
+
+# Formats whose prepared data lives at cfg["dataset"][<name>] (falling back to
+# the conventional data/formats/<ds>/<name> path) and whose loader just needs
+# that root. Keeps _build_loader from growing one branch per format.
+_ROOT_FORMATS = ("lmdb", "hdf5", "tfrecord", "huggingface", "ffcv")
 
 
 def _set_all_seeds(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def _loader_cells(cfg: dict) -> list[tuple[str, str, dict]]:
+    """Normalize `cfg['loaders']` into (display_name, format, overrides) cells.
+
+    Each entry is either a plain string (`display_name == format`, no overrides)
+    or a dict with a required `format` plus an optional `name` (the bar label,
+    defaults to `format`) and any per-cell config overrides merged over the
+    top-level cfg. This lets ONE matrix carry several configurations of the same
+    format as distinct bars — e.g. both `datasetfs` (raw, Python-side decode, an
+    apples-to-apples storage comparison) and `datasetfs-rgb` (server-side
+    rgb_uint8 + parallel decode, DFS's unique edge) in the G1 graph:
+
+        loaders:
+          - datasetfs
+          - {format: datasetfs, name: datasetfs-rgb, dfs_decode_mode: rgb_uint8}
+    """
+    cells: list[tuple[str, str, dict]] = []
+    for entry in cfg["loaders"]:
+        if isinstance(entry, str):
+            cells.append((entry, entry, {}))
+        elif isinstance(entry, dict):
+            if "format" not in entry:
+                raise ValueError(f"loaders entry missing 'format': {entry!r}")
+            fmt = entry["format"]
+            name = entry.get("name", fmt)
+            overrides = {k: v for k, v in entry.items() if k not in ("name", "format")}
+            cells.append((name, fmt, overrides))
+        else:
+            raise ValueError(f"bad loaders entry (want str or dict): {entry!r}")
+    return cells
 
 
 def _label_to_idx(imagefolder_root: Path) -> dict[str, int]:
@@ -82,6 +132,9 @@ def _build_loader(loader_name: str, cfg: dict, label_to_idx: dict, seed: int):
         "label_to_idx": label_to_idx,
         "seed": seed,
     }
+    # Modality (image|audio) routes every format's decode path; default image.
+    if "modality" in cfg:
+        common["modality"] = cfg["modality"]
     cls = LOADER_CLASSES[loader_name]
     if loader_name == "imagefolder":
         return cls({**common, "root": ds["imagefolder"]})
@@ -103,27 +156,40 @@ def _build_loader(loader_name: str, cfg: dict, label_to_idx: dict, seed: int):
         if "dfs_decode_parallelism" in cfg:
             spec["decode_parallelism"] = cfg["dfs_decode_parallelism"]
         return cls(spec)
+    if loader_name == "synthetic":
+        spec = {**common}
+        if "synthetic_samples" in cfg:
+            spec["synthetic_samples"] = cfg["synthetic_samples"]
+        return cls(spec)
+    if loader_name in _ROOT_FORMATS:
+        root = ds.get(loader_name, f"data/formats/{ds['name']}/{loader_name}")
+        return cls({**common, "root": root})
     raise ValueError(loader_name)
 
 
 def _run_one_cell(
-    loader_name: str,
+    display_name: str,
+    loader_format: str,
     cfg: dict,
     label_to_idx: dict,
     seed: int,
     out_dir: Path,
     daemon: DaemonManager | None,
 ) -> tuple[list[EpochStats], dict, dict]:
-    """Run one (loader, seed) cell, returning (epoch_stats, system_summary, daemon_summary)."""
-    print(f"\n=== {loader_name} seed={seed} ===", flush=True)
+    """Run one (loader, seed) cell, returning (epoch_stats, system_summary, daemon_summary).
+
+    `display_name` is the bar label (may differ from `loader_format` when a
+    matrix carries several configs of one format — see `_loader_cells`); `cfg`
+    is already the per-cell effective config (top-level merged with overrides)."""
+    print(f"\n=== {display_name} seed={seed} ===", flush=True)
     _set_all_seeds(seed)
 
-    if loader_name == "datasetfs":
+    if loader_format == "datasetfs":
         assert daemon is not None, "DatasetFS run requires a daemon"
         # Fresh session per seed — avoids any state leak from previous run.
         daemon.restart()
 
-    loader = _build_loader(loader_name, cfg, label_to_idx, seed)
+    loader = _build_loader(loader_format, cfg, label_to_idx, seed)
     loader.setup()
 
     model = build_model(cfg["model"], num_classes=len(label_to_idx))
@@ -132,25 +198,26 @@ def _run_one_cell(
 
     # Track Python tree + daemon (if DFS) for per-process RSS.
     track_pids = [os.getpid()]
-    if loader_name == "datasetfs" and daemon is not None and daemon.pid is not None:
+    if loader_format == "datasetfs" and daemon is not None and daemon.pid is not None:
         track_pids.append(daemon.pid)
 
     sampler = SystemSampler(interval_s=0.2, track_pids=track_pids)
-    daemon_before = daemon_metrics.snapshot() if loader_name == "datasetfs" else {}
+    daemon_before = daemon_metrics.snapshot() if loader_format == "datasetfs" else {}
 
     sampler.start()
     stats: list[EpochStats] = []
     try:
         for epoch in range(cfg["epochs"]):
             dl = loader.make_loader()
-            it = iter(dl)
             ep_stats = train_one_epoch(
-                model, it, optim, loss_fn,
+                model, dl, optim, loss_fn,
                 epoch_idx=epoch,
                 max_batches=cfg.get("max_batches_per_epoch"),
+                warmup_batches=cfg.get("warmup_batches", 0),
             )
             print(
-                f"  epoch={epoch} samples/sec={ep_stats.samples_per_second:.1f} "
+                f"  epoch={epoch} sps={ep_stats.samples_per_second:.1f} "
+                f"steady_sps={ep_stats.steady_samples_per_second:.1f} "
                 f"TTFB={ep_stats.time_to_first_batch:.2f}s "
                 f"stall={ep_stats.stall_fraction:.2%}",
                 flush=True,
@@ -158,12 +225,12 @@ def _run_one_cell(
             stats.append(ep_stats)
             # Drop the DataLoader workers between epochs to avoid pipe state
             # bleeding across epochs.
-            del it, dl
+            del dl
     finally:
         sampler.stop()
         loader.teardown()
 
-    daemon_after = daemon_metrics.snapshot() if loader_name == "datasetfs" else {}
+    daemon_after = daemon_metrics.snapshot() if loader_format == "datasetfs" else {}
     return stats, sampler.summary(), daemon_metrics.cell_summary(daemon_before, daemon_after)
 
 
@@ -199,11 +266,14 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
     label_to_idx = _label_to_idx(Path(cfg["dataset"]["imagefolder"]))
     print(f"[runner] {len(label_to_idx)} classes", flush=True)
 
-    # Spin up the daemon once if DatasetFS is in the loader list. We reuse
-    # the process across seeds; each seed calls daemon.restart() for a fresh
-    # session (handled inside _run_one_cell).
+    cells = _loader_cells(cfg)
+
+    # Spin up the daemon once if any cell is a DatasetFS format (possibly under
+    # several display names, e.g. raw + rgb_uint8). We reuse the process across
+    # seeds; each seed calls daemon.restart() for a fresh session (handled
+    # inside _run_one_cell), and the decode-mode override is sent per cell.
     daemon: DaemonManager | None = None
-    if "datasetfs" in cfg["loaders"]:
+    if any(fmt == "datasetfs" for _, fmt, _ in cells):
         daemon = DaemonManager(
             binary=REPO_ROOT / cfg["daemon_binary"],
             root_path=Path(cfg["dataset"]["datasetfs"]).resolve(),
@@ -225,7 +295,8 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
 
     summary_rows: list[dict] = []
     try:
-        for loader_name in cfg["loaders"]:
+        for display_name, loader_format, overrides in cells:
+            cfg_eff = {**cfg, **overrides}
             for seed in cfg["seeds"]:
                 # Drop OS page cache before each cell for fair I/O measurement.
                 cache_state = "uncontrolled"
@@ -235,12 +306,18 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
                     else:
                         cache_state = "uncontrolled"
 
-                ep_stats, sys_summary, dmn_summary = _run_one_cell(
-                    loader_name, cfg, label_to_idx, seed, out_dir, daemon,
-                )
+                try:
+                    ep_stats, sys_summary, dmn_summary = _run_one_cell(
+                        display_name, loader_format, cfg_eff, label_to_idx, seed, out_dir, daemon,
+                    )
+                except FormatUnavailable as e:
+                    # Sparse matrix cell (e.g. FFCV on macOS, or data not
+                    # prepared). Log and skip the rest of this loader's seeds.
+                    print(f"[runner] SKIP {display_name}: {e}", flush=True)
+                    break
                 for ep in ep_stats:
                     row: dict[str, Any] = {
-                        "loader": loader_name,
+                        "loader": display_name,
                         "seed": seed,
                         "warmup": ep.epoch < cfg.get("warmup_epochs", 0),
                         "cache_state": cache_state,

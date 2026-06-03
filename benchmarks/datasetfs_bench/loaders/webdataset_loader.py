@@ -1,32 +1,32 @@
 """WebDataset — the canonical streaming-shards format. Main competitor."""
 from __future__ import annotations
 
+import functools
 import glob
-import io
 from pathlib import Path
 from typing import ClassVar
 
-from PIL import Image
 from torch.utils.data import DataLoader
 
-from .base import BaseLoader
-from ._common import bound_wds_collate, make_image_transform
+from .base import BaseLoader, FormatUnavailable
+from ._common import bound_wds_collate, make_sample_decoder
+
+# Data field key inside each tar sample, by modality (prepare_webdataset stores
+# the raw file bytes under its lowercased extension).
+_IMAGE_KEYS = ("jpg", "jpeg", "png")
+_AUDIO_KEYS = ("wav", "flac")
 
 
-# Module-level so DataLoader workers (`spawn` start method on macOS) can
-# pickle them. We bypass webdataset's autodecode entirely because its default
-# `.cls` decoder tries `int(data)` — but our class names are ImageNet synsets
-# like "n01440764", not integers.
-def _decode_sample(sample):
-    img = Image.open(io.BytesIO(sample["jpg"]))
+# Module-level so DataLoader workers (`spawn` start method on macOS) can pickle
+# them. We bypass webdataset's autodecode (its `.cls` decoder tries `int(data)`,
+# but our class names are synsets like "n01440764") and run our shared per-
+# modality decoder so every format feeds the model identical tensors.
+def _decode_sample(sample, decode, data_keys):
+    data = next((sample[k] for k in data_keys if k in sample), None)
     label = sample["cls"]
     if isinstance(label, (bytes, bytearray)):
         label = label.decode("utf-8")
-    return img, label
-
-
-def _identity(x):
-    return x
+    return decode(data), label
 
 
 class WebDatasetLoader(BaseLoader):
@@ -41,9 +41,11 @@ class WebDatasetLoader(BaseLoader):
         root = Path(self.spec["root"])
         shards = sorted(glob.glob(str(root / "shard-*.tar")))
         if not shards:
-            raise FileNotFoundError(f"no WebDataset shards found under {root}")
+            raise FormatUnavailable(f"no WebDataset shards found under {root}")
         self._shards = shards
-        self._transform = make_image_transform(self.image_size)
+        modality = self.spec.get("modality", "image")
+        self._decode = make_sample_decoder(modality, self.image_size)
+        self._data_keys = _AUDIO_KEYS if modality == "audio" else _IMAGE_KEYS
 
     def make_loader(self) -> DataLoader:
         import webdataset as wds
@@ -53,8 +55,7 @@ class WebDatasetLoader(BaseLoader):
             # shard count, so effectively a full reshuffle every epoch).
             wds.WebDataset(self._shards, shardshuffle=100, empty_check=False)
             .shuffle(1000)
-            .map(_decode_sample)
-            .map_tuple(self._transform, _identity)
+            .map(functools.partial(_decode_sample, decode=self._decode, data_keys=self._data_keys))
         )
         return DataLoader(
             ds,

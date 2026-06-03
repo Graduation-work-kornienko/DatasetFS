@@ -8,7 +8,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import pickle
 import shutil
 import subprocess
 import sys
@@ -17,7 +19,11 @@ from pathlib import Path
 from scripts.datasets._fastai import ALL_DATASETS, FastaiDataset, ensure_dataset
 
 
-ALL_FORMATS = ("imagefolder", "webdataset", "huggingface", "datasetfs")
+ALL_FORMATS = (
+    "imagefolder", "webdataset", "huggingface", "datasetfs",
+    # Format-matrix (G1): same files, different storage engines.
+    "lmdb", "hdf5", "tfrecord", "ffcv",
+)
 
 
 def _train_dir(ds: FastaiDataset, extracted: Path) -> Path:
@@ -141,6 +147,167 @@ def prepare_huggingface(ds: FastaiDataset, extracted: Path, out: Path) -> None:
     print(f"[done] {ds.name}/huggingface", flush=True)
 
 
+# ---- format-matrix engines (G1): same (file, label) set, different storage ----
+# All read the identical filtered sample list (_list_samples → ds.classes only),
+# store the RAW file bytes + the class-name string, and write a `.done` marker.
+# Labels are kept as strings so loaders map them through the SAME runtime
+# label_to_idx every other format uses — no prep-time index drift.
+
+
+def prepare_lmdb(ds: FastaiDataset, extracted: Path, out: Path) -> None:
+    """LMDB key-value store: key=f"{idx:08d}", value=pickle{data,label}.
+    A `__keys__` entry holds the ordered key list (the dataset length/iteration
+    order) so the loader needn't enumerate the env."""
+    marker = out / ".done"
+    if marker.exists():
+        print(f"[skip] {ds.name}/lmdb already prepared", flush=True)
+        return
+    import lmdb
+
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+
+    samples = _list_samples(ds, _train_dir(ds, extracted))
+    total = sum(p.stat().st_size for p, _ in samples)
+    # Generous, sparse map_size: raw bytes + pickle overhead + headroom.
+    map_size = int(total * 1.5) + 256 * 1024 * 1024
+    print(f"[lmdb] {ds.name}: writing {len(samples)} samples (~{total/1e6:.0f} MB)", flush=True)
+
+    env = lmdb.open(str(out), map_size=map_size, subdir=True, writemap=False)
+    keys: list[str] = []
+    with env.begin(write=True) as txn:
+        for idx, (img_path, label) in enumerate(samples):
+            key = f"{idx:08d}"
+            with open(img_path, "rb") as f:
+                data = f.read()
+            txn.put(key.encode(), pickle.dumps({"data": data, "label": label},
+                                               protocol=pickle.HIGHEST_PROTOCOL))
+            keys.append(key)
+        txn.put(b"__keys__", pickle.dumps(keys, protocol=pickle.HIGHEST_PROTOCOL))
+    env.sync()
+    env.close()
+
+    marker.touch()
+    print(f"[done] {ds.name}/lmdb", flush=True)
+
+
+def prepare_hdf5(ds: FastaiDataset, extracted: Path, out: Path) -> None:
+    """Single HDF5 file with a variable-length uint8 `data` dataset (raw file
+    bytes per sample) and a string `labels` dataset."""
+    marker = out / ".done"
+    if marker.exists():
+        print(f"[skip] {ds.name}/hdf5 already prepared", flush=True)
+        return
+    import h5py
+    import numpy as np
+
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+
+    samples = _list_samples(ds, _train_dir(ds, extracted))
+    print(f"[hdf5] {ds.name}: writing {len(samples)} samples", flush=True)
+
+    h5_path = out / "data.h5"
+    with h5py.File(h5_path, "w") as h5:
+        n = len(samples)
+        data_ds = h5.create_dataset("data", (n,), dtype=h5py.vlen_dtype(np.uint8))
+        label_ds = h5.create_dataset("labels", (n,), dtype=h5py.string_dtype())
+        for idx, (img_path, label) in enumerate(samples):
+            with open(img_path, "rb") as f:
+                raw = f.read()
+            data_ds[idx] = np.frombuffer(raw, dtype=np.uint8)
+            label_ds[idx] = label
+
+    marker.touch()
+    print(f"[done] {ds.name}/hdf5", flush=True)
+
+
+def prepare_tfrecord(ds: FastaiDataset, extracted: Path, out: Path) -> None:
+    """A single `data.tfrecord` of Example{image:bytes, label:bytes} plus the
+    `data.index` the tfrecord torch reader needs for sharded random access."""
+    marker = out / ".done"
+    if marker.exists():
+        print(f"[skip] {ds.name}/tfrecord already prepared", flush=True)
+        return
+    from tfrecord import TFRecordWriter
+    from tfrecord.tools.tfrecord2idx import create_index
+
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+
+    samples = _list_samples(ds, _train_dir(ds, extracted))
+    print(f"[tfrecord] {ds.name}: writing {len(samples)} samples", flush=True)
+
+    rec_path = out / "data.tfrecord"
+    writer = TFRecordWriter(str(rec_path))
+    for img_path, label in samples:
+        with open(img_path, "rb") as f:
+            data = f.read()
+        writer.write({"image": (data, "byte"), "label": (label.encode("utf-8"), "byte")})
+    writer.close()
+
+    create_index(str(rec_path), str(out / "data.index"))
+
+    marker.touch()
+    print(f"[done] {ds.name}/tfrecord", flush=True)
+
+
+def prepare_ffcv(ds: FastaiDataset, extracted: Path, out: Path) -> None:
+    """FFCV `.beton`. Linux-only: FFCV has no macOS wheels. On darwin we write a
+    `.skipped` marker and return so the format-matrix prep stays a no-op there;
+    the loader mirrors this gate. See requirements-linux.txt."""
+    if sys.platform == "darwin":
+        out.mkdir(parents=True, exist_ok=True)
+        (out / ".skipped").write_text(
+            "FFCV is Linux-only; skipped on darwin. See requirements-linux.txt.\n"
+        )
+        print(f"[skip] {ds.name}/ffcv (Linux-only, darwin host)", flush=True)
+        return
+
+    marker = out / ".done"
+    if marker.exists():
+        print(f"[skip] {ds.name}/ffcv already prepared", flush=True)
+        return
+    try:
+        import numpy as np
+        from ffcv.writer import DatasetWriter
+        from ffcv.fields import RGBImageField, IntField
+        from PIL import Image
+    except ImportError:
+        print("[error] ffcv not installed; pip install -r requirements-linux.txt", file=sys.stderr)
+        raise
+
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+
+    samples = _list_samples(ds, _train_dir(ds, extracted))
+    labels = sorted({label for _, label in samples})
+    label_to_idx = {l: i for i, l in enumerate(labels)}
+    (out / "label_to_idx.json").write_text(json.dumps(label_to_idx))
+
+    class _PILDataset:
+        def __len__(self):
+            return len(samples)
+
+        def __getitem__(self, i):
+            path, label = samples[i]
+            return np.array(Image.open(path).convert("RGB")), label_to_idx[label]
+
+    beton = out / "data.beton"
+    writer = DatasetWriter(str(beton), {
+        "image": RGBImageField(write_mode="jpg"),
+        "label": IntField(),
+    })
+    writer.from_indexed_dataset(_PILDataset())
+
+    marker.touch()
+    print(f"[done] {ds.name}/ffcv", flush=True)
+
+
 def _ensure_converter_binary(repo_root: Path) -> Path:
     binary = repo_root / "bin" / "datasetfs"
     binary.parent.mkdir(parents=True, exist_ok=True)
@@ -205,6 +372,14 @@ def prepare(ds: FastaiDataset, data_root: Path, repo_root: Path, formats: tuple[
         # Use the filtered imagefolder so the Go converter sees ONLY ds.classes
         # (avoids treating _background_noise_ etc. as classes for Speech Commands).
         prepare_datasetfs(ds, imagefolder_path, formats_root / "datasetfs", repo_root)
+    if "lmdb" in formats:
+        prepare_lmdb(ds, extracted, formats_root / "lmdb")
+    if "hdf5" in formats:
+        prepare_hdf5(ds, extracted, formats_root / "hdf5")
+    if "tfrecord" in formats:
+        prepare_tfrecord(ds, extracted, formats_root / "tfrecord")
+    if "ffcv" in formats:
+        prepare_ffcv(ds, extracted, formats_root / "ffcv")
 
 
 def main() -> int:

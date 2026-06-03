@@ -123,9 +123,55 @@ def webdataset_collate(items, label_to_idx):
     return images, targets
 
 
+def labeled_collate(items, label_to_idx):
+    """Generic (image_tensor, label_str) collate shared by the byte-store format
+    loaders (LMDB/HDF5/TFRecord/HuggingFace). Maps the class-name string through
+    the SAME runtime label_to_idx every format uses — no prep-time index drift."""
+    images = torch.stack([img for img, _ in items])
+    targets = torch.tensor(
+        [label_to_idx[lbl] for _, lbl in items],
+        dtype=torch.long,
+    )
+    return images, targets
+
+
 def bound_dfs_collate(label_to_idx):
     return functools.partial(dfs_collate, label_to_idx=label_to_idx)
 
 
 def bound_wds_collate(label_to_idx):
     return functools.partial(webdataset_collate, label_to_idx=label_to_idx)
+
+
+def bound_labeled_collate(label_to_idx):
+    return functools.partial(labeled_collate, label_to_idx=label_to_idx)
+
+
+def decode_image_bytes(raw, image_transform):
+    """raw JPEG/PNG bytes → transformed CHW tensor. Module-level so it pickles
+    across the `spawn` worker boundary (closures don't)."""
+    from PIL import Image
+    img = Image.open(io.BytesIO(bytes(raw)))
+    return image_transform(img)
+
+
+def decode_audio_bytes(raw):
+    """raw WAV bytes → (1, n_mels, T) log-mel tensor, or None on a bad sample.
+    Module-level (picklable). Mirrors the DatasetFS audio path so every format
+    feeds the model identical inputs."""
+    waveform = audio_decode_fn(raw)
+    if waveform is None:
+        return None
+    return audio_melspec_transform(waveform)
+
+
+def make_sample_decoder(modality: str, image_size: int):
+    """Return a picklable `raw_bytes -> tensor` decoder for the modality, so the
+    byte-store format loaders (LMDB/HDF5/TFRecord/WebDataset/ImageFolder) stay
+    storage-only and share ONE decode path per modality — no per-format decode
+    drift. `image` → PIL + canonical transform; `audio` → soundfile + log-mel."""
+    if modality == "audio":
+        return decode_audio_bytes
+    if modality == "image":
+        return functools.partial(decode_image_bytes, image_transform=make_image_transform(image_size))
+    raise ValueError(f"unknown modality {modality!r}")

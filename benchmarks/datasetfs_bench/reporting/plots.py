@@ -21,8 +21,12 @@ def _read_rows(csv_path: Path) -> list[dict]:
 
 
 def _aggregate_throughput(rows: list[dict]) -> dict[str, tuple[float, float, int]]:
-    """For each loader, compute mean ± stddev of samples_per_second across
-    seeds, using ONLY non-warmup epochs. Returns {loader: (mean, stddev, n_seeds)}."""
+    """For each loader, compute mean ± stddev of throughput across seeds, using
+    ONLY non-warmup epochs. Returns {loader: (mean, stddev, n_seeds)}.
+
+    Prefers `steady_samples_per_second` (post-warmup window, spawn/priming
+    excluded uniformly across formats) when present, falling back to the
+    whole-epoch `samples_per_second` for older runs without the column."""
     per_loader: dict[str, list[float]] = defaultdict(list)
     per_loader_seeds: dict[str, set[int]] = defaultdict(set)
 
@@ -30,7 +34,8 @@ def _aggregate_throughput(rows: list[dict]) -> dict[str, tuple[float, float, int
         if r.get("warmup", "").lower() == "true":
             continue
         loader = r["loader"]
-        sps = float(r["samples_per_second"])
+        sps_str = r.get("steady_samples_per_second") or r.get("samples_per_second")
+        sps = float(sps_str)
         per_loader[loader].append(sps)
         per_loader_seeds[loader].add(int(r["seed"]))
 
@@ -61,6 +66,19 @@ def _aggregate_latency(rows: list[dict]) -> dict[str, dict[str, float]]:
     return out
 
 
+def loader_display_names(loaders_cfg) -> list[str]:
+    """Bar labels from a config `loaders` list, whose entries may be plain
+    format strings or dicts (`{format, name?}`) — mirrors
+    `runner.single_run._loader_cells` so the bar order matches the run order."""
+    names: list[str] = []
+    for e in loaders_cfg:
+        if isinstance(e, dict):
+            names.append(e.get("name", e["format"]))
+        else:
+            names.append(e)
+    return names
+
+
 def plot_throughput_bar(run_dir: Path) -> Path:
     rows = _read_rows(run_dir / "summary.csv")
     agg = _aggregate_throughput(rows)
@@ -72,8 +90,8 @@ def plot_throughput_bar(run_dir: Path) -> Path:
     if config_path.exists():
         import yaml
         with open(config_path) as f:
-            order = yaml.safe_load(f).get("loaders", sorted(agg.keys()))
-    else:
+            order = loader_display_names(yaml.safe_load(f).get("loaders", []))
+    if not config_path.exists() or not order:
         order = sorted(agg.keys())
     order = [l for l in order if l in agg]
 

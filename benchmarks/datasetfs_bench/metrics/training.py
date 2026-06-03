@@ -25,13 +25,30 @@ class EpochStats:
     n_batches: int
     n_samples: int
     wall_seconds: float
-    time_to_first_batch: float        # from iter start → first batch yielded
+    time_to_first_batch: float        # from iter start (incl. worker spawn) → first batch
     fetch_latency_seconds: list[float] = field(default_factory=list)
     compute_seconds: list[float] = field(default_factory=list)
+    # Steady-state window: samples/time AFTER the first `warmup_batches` batches
+    # are dropped. This excludes the one-time DataLoader worker-spawn + pipeline
+    # priming cost UNIFORMLY across formats. Without it the wall-based number
+    # unfairly penalizes IterableDataset loaders (DatasetFS/WebDataset/TFRecord),
+    # whose workers spawn lazily on the first next() — inside the timed region —
+    # while map-style loaders (ImageFolder/LMDB/HDF5) spawn during iter(), which
+    # historically fell outside it. (Diagnosed 2026-06-03 via profiling/ttfb_probe.py.)
+    steady_n_samples: int = 0
+    steady_wall_seconds: float = 0.0
 
     @property
     def samples_per_second(self) -> float:
         return self.n_samples / self.wall_seconds if self.wall_seconds > 0 else 0.0
+
+    @property
+    def steady_samples_per_second(self) -> float:
+        """Throughput over the post-warmup steady window. Falls back to the
+        whole-epoch number if the epoch was too short to have a steady window."""
+        if self.steady_wall_seconds > 0 and self.steady_n_samples > 0:
+            return self.steady_n_samples / self.steady_wall_seconds
+        return self.samples_per_second
 
     @property
     def stall_fraction(self) -> float:
@@ -49,6 +66,9 @@ class EpochStats:
             "n_samples": self.n_samples,
             "wall_seconds": self.wall_seconds,
             "samples_per_second": self.samples_per_second,
+            "steady_samples_per_second": self.steady_samples_per_second,
+            "steady_n_samples": self.steady_n_samples,
+            "steady_wall_seconds": self.steady_wall_seconds,
             "time_to_first_batch": self.time_to_first_batch,
             "stall_fraction": self.stall_fraction,
             "fetch_p50": _percentile(self.fetch_latency_seconds, 50),
