@@ -7,6 +7,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof/* on the default mux
 	"sync"
+	"time"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/metrics"
@@ -57,9 +58,9 @@ func (s *session) stop() {
 	if s.coreIdx != nil {
 		s.coreIdx.Unpin(s.snap)
 	}
-	if s.alloc != nil {
-		s.alloc.Close()
-	}
+	// NOTE: s.alloc is NOT closed here — the daemon owns one shared allocator
+	// (sharedAlloc) reused across sessions. Re-mmapping ~1 GB every epoch was
+	// pure waste; we Reset() its refcounts on reuse instead. See initialize_loading.
 	metrics.ActivePipelines.Store(0)
 }
 
@@ -67,6 +68,10 @@ var (
 	mu                sync.Mutex
 	currentSession    *session
 	maintenanceActive bool
+	// sharedAlloc is the daemon's single SHM allocator, created lazily on the
+	// first /initialize_loading and reused (Reset, not re-mmapped) every session.
+	// Guarded by mu (only touched inside the handler under the lock).
+	sharedAlloc *shm.Allocator
 )
 
 // BeginMaintenance reserves the dataset for an exclusive maintenance operation
@@ -162,20 +167,34 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 			return
 		}
 
+		tStop := time.Now()
 		if currentSession != nil {
 			currentSession.stop()
 			currentSession = nil
 		}
+		dStop := time.Since(tStop)
 
-		alloc, err := shm.NewAllocator()
-		if err != nil {
-			log.Printf("[IPC] Ошибка создания Shared Memory: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		tAlloc := time.Now()
+		// One shared allocator for the daemon's lifetime, reused across sessions:
+		// allocate (mmap ~1 GB) once, then just Reset() refcounts each session.
+		// Saves 33–69 ms/epoch of file-recreate + mmap and avoids churning a 1 GB
+		// mapping every epoch.
+		if sharedAlloc == nil {
+			a, err := shm.NewAllocator()
+			if err != nil {
+				log.Printf("[IPC] Ошибка создания Shared Memory: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			sharedAlloc = a
 		}
+		sharedAlloc.Reset()
+		alloc := sharedAlloc
+		dAlloc := time.Since(tAlloc)
 
 		// Pin one immutable snapshot for the whole session so every worker reads
 		// the same generation even if a mutation lands mid-setup (feature F1).
+		tPipe := time.Now()
 		snap := coreIdx.Pin()
 		s := &session{alloc: alloc, coreIdx: coreIdx, snap: snap}
 		for wID := 0; wID < numWorkers; wID++ {
@@ -196,6 +215,9 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 			s.pipelines = append(s.pipelines, p)
 		}
 		currentSession = s
+		log.Printf("[IPC timing] stop=%.1fms alloc=%.1fms pipelines=%.1fms (workers=%d)",
+			float64(dStop.Microseconds())/1000, float64(dAlloc.Microseconds())/1000,
+			float64(time.Since(tPipe).Microseconds())/1000, numWorkers)
 		metrics.ActivePipelines.Store(int32(numWorkers))
 
 		w.Header().Set("Content-Type", "application/json")

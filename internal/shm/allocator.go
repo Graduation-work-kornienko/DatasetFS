@@ -58,6 +58,19 @@ func NewAllocator() (*Allocator, error) {
 	}, nil
 }
 
+// Reset zeroes every slot's refcount so a REUSED allocator presents all slots
+// as free to a new loading session. The ~1 GB data buffer is left untouched
+// (each slot is overwritten lazily as its first shard loads), which is the
+// whole point: re-mmapping TotalSize on every /initialize_loading cost 33–69 ms
+// per epoch for no benefit, since the size never changes. Must be called only
+// after the previous session's goroutines have been joined (no concurrent SHM
+// access), which server.go guarantees by stopping the old session first.
+func (a *Allocator) Reset() {
+	for i := range a.refsMap {
+		atomic.StoreInt32(&a.refsMap[i], 0)
+	}
+}
+
 func (a *Allocator) GetSlotBuffer(slotID int) []byte {
 	start := slotID * SlotSize
 	end := start + SlotSize
