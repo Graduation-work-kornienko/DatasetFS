@@ -135,6 +135,34 @@ def labeled_collate(items, label_to_idx):
     return images, targets
 
 
+def multimodal_collate(items, label_to_idx):
+    """Collate image+tabular samples for G12.
+
+    Accepts either ``({"image": tensor, "tab": vector}, label_str)`` or
+    dictionaries with keys ``image``, ``tab`` and ``label``. Returns the generic
+    train-loop contract ``({"image": [N,C,H,W], "tab": [N,F]}, targets)``.
+    """
+    images = []
+    tabs = []
+    labels = []
+    for item in items:
+        if isinstance(item, dict):
+            images.append(item["image"])
+            tabs.append(torch.as_tensor(item["tab"], dtype=torch.float32))
+            labels.append(item["label"])
+        else:
+            sample, label = item
+            images.append(sample["image"])
+            tabs.append(torch.as_tensor(sample["tab"], dtype=torch.float32))
+            labels.append(label)
+    inputs = {
+        "image": torch.stack(images),
+        "tab": torch.stack(tabs),
+    }
+    targets = torch.tensor([label_to_idx[lbl] for lbl in labels], dtype=torch.long)
+    return inputs, targets
+
+
 def bound_dfs_collate(label_to_idx):
     return functools.partial(dfs_collate, label_to_idx=label_to_idx)
 
@@ -145,6 +173,10 @@ def bound_wds_collate(label_to_idx):
 
 def bound_labeled_collate(label_to_idx):
     return functools.partial(labeled_collate, label_to_idx=label_to_idx)
+
+
+def bound_multimodal_collate(label_to_idx):
+    return functools.partial(multimodal_collate, label_to_idx=label_to_idx)
 
 
 def decode_image_bytes(raw, image_transform):

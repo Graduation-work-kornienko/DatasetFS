@@ -30,9 +30,11 @@ func newDaemonCmd() *cobra.Command {
 		noMount          bool
 		mutexProfileRate int
 		blockProfileRate int
-		cacheDir         string
-		walFormat        string
-		autoVacuum       bool
+		cacheDir            string
+		prefetchConcurrency int
+		remoteThrottle      int64
+		walFormat           string
+		autoVacuum          bool
 		vacuumInterval   time.Duration
 		vacuumThreshold  float64
 		vacuumThrottle   int64
@@ -56,18 +58,19 @@ func newDaemonCmd() *cobra.Command {
 			// Create remote storage if needed.
 			var remoteStorage *storage.RemoteStorage
 			if storage.IsURL(rootPath) {
-				remoteStorage = storage.NewRemoteStorage(cacheDir)
+				remoteStorage = storage.NewRemoteStorage(cacheDir, remoteThrottle)
 			}
 
-			// Resolve the local root. For a remote (HTTP) dataset, prefetch the
-			// manifest and every shard into the cache dir up front, then run
-			// purely local.
+			// Resolve the local root. For a remote (HTTP) dataset, fetch ONLY the
+			// manifest into the cache dir and build a streaming prefetcher; the
+			// shards download in the background while training runs (G9/G14).
 			var localRoot string
+			var prefetcher *storage.RemotePrefetcher
 			var err error
 			if remoteStorage != nil {
-				localRoot, err = prefetchRemoteDataset(remoteStorage, rootPath, cacheDir)
+				localRoot, prefetcher, err = prefetchRemoteManifest(remoteStorage, rootPath, cacheDir, prefetchConcurrency)
 				if err != nil {
-					return fmt.Errorf("prefetch remote dataset: %w", err)
+					return fmt.Errorf("prefetch remote manifest: %w", err)
 				}
 			} else {
 				localRoot = rootPath
@@ -84,6 +87,11 @@ func newDaemonCmd() *cobra.Command {
 			log.Println("Loaded")
 
 			strg := storage.New(localRoot, remoteStorage)
+			// Wire the streaming prefetcher and start its background workers.
+			if prefetcher != nil {
+				strg.Prefetcher = prefetcher
+				prefetcher.Start(cmd.Context())
+			}
 
 			// Open WAL early so MutationManager can write to it, and so Replay
 			// below recovers any mutations since the last manifest checkpoint.
@@ -188,6 +196,8 @@ func newDaemonCmd() *cobra.Command {
 	cmd.Flags().IntVar(&mutexProfileRate, "mutex-profile-rate", 0, "If >0, enables /debug/pprof/mutex with 1-in-N sampling. Adds ~1-3% overhead.")
 	cmd.Flags().IntVar(&blockProfileRate, "block-profile-rate", 0, "If >0, enables /debug/pprof/block with rate in ns. 1 means every blocking event.")
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", "./dataset_cache", "Directory for caching remote datasets")
+	cmd.Flags().IntVar(&prefetchConcurrency, "prefetch-concurrency", 4, "Background download workers for remote streaming (overlap with training)")
+	cmd.Flags().Int64Var(&remoteThrottle, "remote-throttle", 0, "Limit aggregate remote download bandwidth in bytes/sec (0 = unlimited)")
 	cmd.Flags().StringVar(&walFormat, "wal-format", "json", "Format for WAL (supported: json and binary)")
 	cmd.Flags().BoolVar(&autoVacuum, "auto-vacuum", false, "Run the background vacuumer goroutine (compacts deleted files when idle)")
 	cmd.Flags().DurationVar(&vacuumInterval, "vacuum-interval", 5*time.Minute, "How often the background vacuumer checks fragmentation")

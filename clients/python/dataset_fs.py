@@ -190,6 +190,8 @@ class DatasetFS(IterableDataset):
                 f"daemon acknowledged world_size={ack_world!r} but client asked for "
                 f"{world_size!r}. Likely a daemon version mismatch — rebuild it."
             )
+        self.session_id = ack.get("session_id")
+        self.pipe_path_template = ack.get("pipe_template") or self.pipe_path_template
 
     def _decrement_refcount_by(self, refs_mmap, slot_id, n):
         """Subtract n from a slot's refcount in one read-modify-write (opt 03:

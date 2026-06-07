@@ -48,15 +48,21 @@ class DaemonManager:
     def __init__(
         self,
         binary: Path,
-        root_path: Path,
+        root_path: Path | str,
         cwd: Path,
         log_path: Path | None = None,
         url: str = "http://localhost:51409",
+        cache_dir: Path | str | None = None,
+        prefetch_concurrency: int | None = None,
+        remote_throttle: int | None = None,
     ):
         self.binary = binary
         self.root_path = root_path
         self.cwd = cwd
         self.url = url
+        self.cache_dir = cache_dir
+        self.prefetch_concurrency = prefetch_concurrency
+        self.remote_throttle = remote_throttle
         self._proc: subprocess.Popen | None = None
         self._log_path = log_path
         self._log_file = None
@@ -73,8 +79,15 @@ class DaemonManager:
             f"[daemon] start {self.binary} daemon --no-mount --root {self.root_path}",
             flush=True,
         )
+        argv = [str(self.binary), "daemon", "--no-mount", "--root", str(self.root_path)]
+        if self.cache_dir is not None:
+            argv += ["--cache-dir", str(self.cache_dir)]
+        if self.prefetch_concurrency is not None:
+            argv += ["--prefetch-concurrency", str(self.prefetch_concurrency)]
+        if self.remote_throttle is not None and self.remote_throttle > 0:
+            argv += ["--remote-throttle", str(self.remote_throttle)]
         self._proc = subprocess.Popen(
-            [str(self.binary), "daemon", "--no-mount", "--root", str(self.root_path)],
+            argv,
             cwd=self.cwd,
             stdout=stdout,
             stderr=subprocess.STDOUT,

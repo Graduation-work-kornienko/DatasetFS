@@ -17,3 +17,4 @@ h5py>=3.10         # HDF5 loader
 tfrecord>=1.14     # TFRecord read/write WITHOUT the heavy tensorflow dep
 crc32c>=2.3        # tfrecord record-integrity hashing
 av>=11             # PyAV video decode (Wave 3, short-video modality)
+yadisk>=3          # Yandex.Disk staging/archive (scripts/storage/ydisk.py)

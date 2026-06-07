@@ -1,5 +1,9 @@
-"""Format-agnostic training loop. Consumes any DataLoader that yields
-(images, targets) and produces per-epoch EpochStats."""
+"""Format-agnostic training loop.
+
+Consumes DataLoaders yielding either ``(tensor, targets)`` for single-input
+modalities (image/audio/video) or ``({name: tensor, ...}, targets)`` for
+multimodal samples. Produces per-epoch EpochStats.
+"""
 from __future__ import annotations
 
 import time
@@ -11,6 +15,21 @@ import torch.nn as nn
 from ..metrics.training import EpochStats, TimedLoaderIter
 
 
+def _batch_size(inputs) -> int:
+    if isinstance(inputs, dict):
+        if not inputs:
+            return 0
+        first = next(iter(inputs.values()))
+        return int(first.shape[0])
+    return int(inputs.shape[0])
+
+
+def _forward(model: nn.Module, inputs):
+    if isinstance(inputs, dict):
+        return model(**inputs)
+    return model(inputs)
+
+
 def train_one_epoch(
     model: nn.Module,
     loader,
@@ -20,6 +39,7 @@ def train_one_epoch(
     *,
     max_batches: int | None = None,
     warmup_batches: int = 0,
+    after_first_batch: Callable[[], None] | None = None,
 ) -> EpochStats:
     """Train for one epoch, returning timing stats.
 
@@ -48,16 +68,18 @@ def train_one_epoch(
     t_steady_start: float | None = None
     steady_n_samples = 0
 
-    for batch_idx, (images, targets) in enumerate(timed):
+    for batch_idx, (inputs, targets) in enumerate(timed):
         if time_to_first is None:
             time_to_first = time.perf_counter() - t_start
+            if after_first_batch is not None:
+                after_first_batch()
         if batch_idx == warmup_batches:
             # Steady window opens just before we process the first post-warmup batch.
             t_steady_start = time.perf_counter()
 
         t_compute_start = time.perf_counter()
         optim.zero_grad()
-        out = model(images)
+        out = _forward(model, inputs)
         loss = loss_fn(out, targets)
         loss.backward()
         optim.step()
@@ -65,9 +87,10 @@ def train_one_epoch(
 
         losses.append(float(loss.item()))
         n_batches += 1
-        n_samples += images.shape[0]
+        batch_n = _batch_size(inputs)
+        n_samples += batch_n
         if batch_idx >= warmup_batches:
-            steady_n_samples += images.shape[0]
+            steady_n_samples += batch_n
 
         if max_batches is not None and n_batches >= max_batches:
             break

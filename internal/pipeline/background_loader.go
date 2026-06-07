@@ -51,8 +51,16 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 			log.Printf("[Loader] Нужно загрузить Слот %d", job.SlotID)
 
 			loadStart := time.Now()
-			shardPath := b.storage.ShardPath(job.ShardID)
-			file, err := b.openFile(shardPath)
+			// EnsureShard returns a guaranteed-complete local path: a no-op for
+			// local datasets, or (for remote/streaming) blocks until the shard
+			// has finished downloading into the cache. The atomic temp+rename in
+			// RemoteStorage.Fetch means the file is whole before io.ReadFull.
+			shardPath, err := b.storage.EnsureShard(job.ShardID)
+			if err != nil {
+				log.Printf("[Loader] ❌ Ошибка получения шарда %d: %v", job.ShardID, err)
+				continue
+			}
+			file, err := os.Open(shardPath)
 			if err != nil {
 				log.Printf("[Loader] ❌ Ошибка открытия шарда %d: %v", job.ShardID, err)
 				continue
@@ -61,7 +69,9 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 
 			targetSlice := b.allocator.GetSlotBuffer(job.SlotID)
 
+			shmStart := time.Now()
 			n, err := io.ReadFull(file, targetSlice[:job.Shard.TotalSize])
+			metrics.SHMWriteLatency.Record(time.Since(shmStart))
 
 			if err != nil {
 				log.Printf("[Loader] ❌ Ошибка io.ReadFull для шарда %d: %v", job.ShardID, err)

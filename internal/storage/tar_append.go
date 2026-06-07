@@ -15,8 +15,9 @@ const (
 )
 
 type Storage struct {
-	Root          string         // Root of dataset
-	RemoteStorage *RemoteStorage // Optional remote storage handler
+	Root          string            // Root of dataset
+	RemoteStorage *RemoteStorage    // Optional remote storage handler
+	Prefetcher    *RemotePrefetcher // Optional streaming-overlap prefetcher (remote datasets)
 }
 
 func New(root string, remoteStorage *RemoteStorage) *Storage {
@@ -24,6 +25,17 @@ func New(root string, remoteStorage *RemoteStorage) *Storage {
 		Root:          root,
 		RemoteStorage: remoteStorage,
 	}
+}
+
+// EnsureShard returns the local path of a shard, guaranteeing it is fully
+// present. For a local dataset this is just ShardPath. For a remote/streaming
+// dataset it blocks (or fetches on demand) until the shard is downloaded — see
+// RemotePrefetcher.EnsureShard.
+func (s *Storage) EnsureShard(shardID int) (string, error) {
+	if s.Prefetcher != nil {
+		return s.Prefetcher.EnsureShard(shardID)
+	}
+	return s.ShardPath(shardID), nil
 }
 
 func (t *Storage) AppendShard(shard *index.Shard) error {

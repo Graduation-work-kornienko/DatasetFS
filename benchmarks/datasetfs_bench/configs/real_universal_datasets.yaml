@@ -1,0 +1,90 @@
+# Real-world DatasetFS universality suite.
+#
+# Intent: prove DatasetFS is not image-only by validating training/data iteration
+# on real 2-5GB-class datasets with different structures. Preparation is kept
+# separate from running because downloads are large and should be staged/archived.
+
+suite: real_universal
+defaults:
+  max_batches: 50
+  batch_size: 32
+  num_workers: 0
+  image_size: 160
+  epochs: 1
+
+datasets:
+  - name: imagewoof
+    task: image_classification
+    modality: image
+    approx_size: "~4-5GB extracted / prepared"
+    source: "fastai imagewoof2"
+    prepare: "make data-restore-raw && python -m scripts.datasets.prepare_formats imagewoof --formats imagefolder datasetfs"
+    datasetfs: data/formats/imagewoof/datasetfs
+    reference: data/formats/imagewoof/imagefolder
+    model: simplecnn
+
+  - name: speech_commands_v2
+    task: audio_classification
+    modality: audio
+    approx_size: "~3-4GB extracted / prepared"
+    source: "TensorFlow Speech Commands V2 / fastai archive"
+    prepare: "make data-restore-raw && python -m scripts.datasets.prepare_formats speech_commands --formats imagefolder datasetfs"
+    datasetfs: data/formats/speech_commands/datasetfs
+    reference: data/formats/speech_commands/imagefolder
+    model: simplecnn_audio
+    batch_size: 64
+
+  - name: librispeech_clean_100
+    task: audio_text
+    modality: audio_text
+    approx_size: "~6GB raw; include if disk/network allows"
+    source: "torchaudio.datasets.LIBRISPEECH train-clean-100"
+    prepare: "python -m scripts.datasets.prepare_real_universal librispeech_clean_100"
+    datasetfs: data/formats/real_universal/librispeech_clean_100/datasetfs
+    reference: data/raw/real_universal/librispeech_clean_100
+    model: audio_text_probe
+    batch_size: 32
+
+  - name: wikipedia_en_slice
+    task: text_language_classification_probe
+    modality: text
+    approx_size: "configurable 2GB materialized slice"
+    source: "HuggingFace wikimedia/wikipedia streaming slice"
+    prepare: "python -m scripts.datasets.prepare_real_universal wikipedia_en_slice --target-gb 2"
+    datasetfs: data/formats/real_universal/wikipedia_en_slice/datasetfs
+    reference: data/raw/real_universal/wikipedia_en_slice
+    model: text_probe
+    batch_size: 64
+
+  - name: amazon_reviews_slice
+    task: text_classification
+    modality: text
+    approx_size: "configurable 2GB materialized slice"
+    source: "HuggingFace amazon_reviews_multi / large real review corpus slice"
+    prepare: "python -m scripts.datasets.prepare_real_universal amazon_reviews_slice --target-gb 2"
+    datasetfs: data/formats/real_universal/amazon_reviews_slice/datasetfs
+    reference: data/raw/real_universal/amazon_reviews_slice
+    model: text_probe
+    batch_size: 64
+
+  - name: flickr30k
+    task: image_caption_multimodal
+    modality: image_text
+    approx_size: "~4GB images + captions"
+    source: "Flickr30k / HF-compatible local export"
+    prepare: "python -m scripts.datasets.prepare_real_universal flickr30k"
+    datasetfs: data/formats/real_universal/flickr30k/datasetfs
+    reference: data/raw/real_universal/flickr30k
+    model: image_text_probe
+    batch_size: 32
+
+  - name: publaynet_slice
+    task: document_layout_multimodal
+    modality: image_regions
+    approx_size: "configurable 3-5GB slice from prepared PubLayNet"
+    source: "PubLayNet HF parquet slice"
+    prepare: "python -m scripts.datasets.prepare_real_universal publaynet_slice --target-gb 4"
+    datasetfs: data/formats/real_universal/publaynet_slice/datasetfs
+    reference: data/raw/publaynet
+    model: image_region_probe
+    batch_size: 32

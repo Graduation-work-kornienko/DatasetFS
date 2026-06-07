@@ -68,6 +68,7 @@ var (
 	mu                sync.Mutex
 	currentSession    *session
 	maintenanceActive bool
+	nextSessionID     uint64
 	// sharedAlloc is the daemon's single SHM allocator, created lazily on the
 	// first /initialize_loading and reused (Reset, not re-mmapped) every session.
 	// Guarded by mu (only touched inside the handler under the lock).
@@ -195,6 +196,8 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 		// Pin one immutable snapshot for the whole session so every worker reads
 		// the same generation even if a mutation lands mid-setup (feature F1).
 		tPipe := time.Now()
+		nextSessionID++
+		sessionID := nextSessionID
 		snap := coreIdx.Pin()
 		s := &session{alloc: alloc, coreIdx: coreIdx, snap: snap}
 		for wID := 0; wID < numWorkers; wID++ {
@@ -204,7 +207,7 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 				NumWorkers: numWorkers,
 				SlotStart:  start,
 				SlotEnd:    end,
-				PipePath:   pipeline.PipePath(wID),
+				PipePath:   pipeline.SessionPipePath(sessionID, wID),
 				Seed:       seed,
 				Decode:     decodeCfg,
 				Rank:       rank,
@@ -222,8 +225,10 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"num_workers": numWorkers,
-			"generation":  snap.Gen,
+			"num_workers":   numWorkers,
+			"session_id":    sessionID,
+			"pipe_template": pipeline.SessionPipeTemplate(sessionID),
+			"generation":    snap.Gen,
 			"decode": map[string]any{
 				"mode":        string(decodeCfg.Mode),
 				"image_size":  decodeCfg.ImageSize,

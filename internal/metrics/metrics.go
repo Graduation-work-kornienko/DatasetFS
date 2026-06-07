@@ -33,6 +33,19 @@ var (
 	SamplesEmittedTotal atomic.Int64
 	// Epochs fully completed (end-of-epoch batch sent).
 	EpochsCompletedTotal atomic.Int64
+
+	// --- remote streaming (G9/G14) -----------------------------------------
+	// Bytes pulled from remote storage into the local cache (sum over Fetch).
+	RemoteBytesDownloadedTotal atomic.Int64
+	// Base shards fully downloaded + cached (ready to serve).
+	RemoteShardsReadyTotal atomic.Int64
+	// Times a consumer (EnsureShard) had to block on a shard that wasn't ready
+	// yet — i.e. training outran the prefetch. The remote analogue of a stall.
+	RemoteShardWaitsTotal atomic.Int64
+	// Remote shard cache outcomes. Hit = shard already present on local cache;
+	// miss = had to perform an HTTP fetch.
+	RemoteCacheHitsTotal   atomic.Int64
+	RemoteCacheMissesTotal atomic.Int64
 )
 
 // --- gauges -----------------------------------------------------------------
@@ -40,6 +53,9 @@ var (
 var (
 	// Currently-active pipelines (= num_workers for the live session).
 	ActivePipelines atomic.Int32
+	// Base shards not yet downloaded (remote streaming). Decremented as the
+	// prefetcher + on-demand fetches complete each shard.
+	RemoteShardsPending atomic.Int32
 	// Daemon startup time, used to compute uptime.
 	startTime = time.Now()
 )
@@ -53,9 +69,9 @@ type LatencyTracker struct {
 	mu      sync.Mutex
 	samples []float64 // in seconds
 	cap     int
-	idx     int      // ring-buffer write head
-	filled  bool     // whether we've wrapped at least once
-	count   int64    // total samples observed (not just stored)
+	idx     int   // ring-buffer write head
+	filled  bool  // whether we've wrapped at least once
+	count   int64 // total samples observed (not just stored)
 }
 
 func NewLatencyTracker(cap int) *LatencyTracker {
@@ -114,6 +130,23 @@ func percentile(sorted []float64, p float64) float64 {
 // to cover ~hundreds of shards × tens of epochs without losing the tail.
 var LoadLatency = NewLatencyTracker(8192)
 
+// RemoteFetchLatency tracks per-shard remote download latency (HTTP GET +
+// write to cache). Reveals the cold-start cost and how it amortizes.
+var RemoteFetchLatency = NewLatencyTracker(8192)
+
+// RemoteShardWaitLatency records actual time consumers spend blocked on remote
+// shard readiness. The wait counter alone cannot quantify lost training time.
+var RemoteShardWaitLatency = NewLatencyTracker(8192)
+
+// DecodeLatency measures daemon-side decode+resize per slot in rgb_uint8 mode.
+var DecodeLatency = NewLatencyTracker(8192)
+
+// SHMWriteLatency measures large slot writes/copies into shared memory.
+var SHMWriteLatency = NewLatencyTracker(8192)
+
+// DealerEmitLatency measures binary frame serialization + FIFO write latency.
+var DealerEmitLatency = NewLatencyTracker(8192)
+
 // --- JSON snapshot ----------------------------------------------------------
 
 type histogram struct {
@@ -147,20 +180,31 @@ type Snapshot struct {
 func collect() Snapshot {
 	return Snapshot{
 		Counters: map[string]int64{
-			"shard_loads_total":          ShardLoadsTotal.Load(),
-			"bytes_read_total":           BytesReadTotal.Load(),
-			"slot_starvation_total":      SlotStarvationTotal.Load(),
-			"refcount_overflow_total":    RefcountOverflowTotal.Load(),
-			"dealer_batches_sent_total":  DealerBatchesSentTotal.Load(),
-			"samples_emitted_total":      SamplesEmittedTotal.Load(),
-			"epochs_completed_total":     EpochsCompletedTotal.Load(),
+			"shard_loads_total":             ShardLoadsTotal.Load(),
+			"bytes_read_total":              BytesReadTotal.Load(),
+			"slot_starvation_total":         SlotStarvationTotal.Load(),
+			"refcount_overflow_total":       RefcountOverflowTotal.Load(),
+			"dealer_batches_sent_total":     DealerBatchesSentTotal.Load(),
+			"samples_emitted_total":         SamplesEmittedTotal.Load(),
+			"epochs_completed_total":        EpochsCompletedTotal.Load(),
+			"remote_bytes_downloaded_total": RemoteBytesDownloadedTotal.Load(),
+			"remote_shards_ready_total":     RemoteShardsReadyTotal.Load(),
+			"remote_shard_waits_total":      RemoteShardWaitsTotal.Load(),
+			"remote_cache_hits_total":       RemoteCacheHitsTotal.Load(),
+			"remote_cache_misses_total":     RemoteCacheMissesTotal.Load(),
 		},
 		Gauges: map[string]float64{
-			"active_pipelines":       float64(ActivePipelines.Load()),
-			"daemon_uptime_seconds":  time.Since(startTime).Seconds(),
+			"active_pipelines":      float64(ActivePipelines.Load()),
+			"daemon_uptime_seconds": time.Since(startTime).Seconds(),
+			"remote_shards_pending": float64(RemoteShardsPending.Load()),
 		},
 		Histograms: map[string]histogram{
-			"load_latency": LoadLatency.histogram(),
+			"load_latency":              LoadLatency.histogram(),
+			"remote_fetch_latency":      RemoteFetchLatency.histogram(),
+			"remote_shard_wait_latency": RemoteShardWaitLatency.histogram(),
+			"decode_latency":            DecodeLatency.histogram(),
+			"shm_write_latency":         SHMWriteLatency.histogram(),
+			"dealer_emit_latency":       DealerEmitLatency.histogram(),
 		},
 	}
 }

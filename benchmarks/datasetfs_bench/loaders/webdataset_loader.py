@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import functools
 import glob
+import shlex
 from pathlib import Path
 from typing import ClassVar
 
@@ -38,14 +39,35 @@ class WebDatasetLoader(BaseLoader):
         except ImportError as e:
             raise ImportError("install `webdataset` to use this loader") from e
 
+        self._shards = self._resolve_shards()
+        modality = self.spec.get("modality", "image")
+        self._decode = make_sample_decoder(modality, self.image_size)
+        self._data_keys = _AUDIO_KEYS if modality == "audio" else _IMAGE_KEYS
+
+    def _resolve_shards(self) -> list[str]:
+        """Local tar files by default; HTTP shard URLs when the spec asks for a
+        remote source (Phase 5, train-while-streaming). webdataset consumes
+        ``http(s)://`` shard URLs directly; for finicky endpoints set
+        ``wds_http_mode: curl`` to stream via ``pipe:curl``."""
+        # Explicit URL list wins.
+        urls = self.spec.get("shard_urls")
+        if not urls and self.spec.get("http_base"):
+            base = str(self.spec["http_base"]).rstrip("/")
+            n = int(self.spec["num_shards"])
+            pattern = self.spec.get("shard_pattern", "shard-{i:06d}.tar")
+            urls = [f"{base}/{pattern.format(i=i)}" for i in range(n)]
+        if urls:
+            if self.spec.get("wds_http_mode") == "curl":
+                limit = self.spec.get("wds_curl_limit_rate")
+                limit_arg = f" --limit-rate {shlex.quote(str(limit))}" if limit else ""
+                return [f"pipe:curl -s -L{limit_arg} {shlex.quote(u)}" for u in urls]
+            return list(urls)
+
         root = Path(self.spec["root"])
         shards = sorted(glob.glob(str(root / "shard-*.tar")))
         if not shards:
             raise FormatUnavailable(f"no WebDataset shards found under {root}")
-        self._shards = shards
-        modality = self.spec.get("modality", "image")
-        self._decode = make_sample_decoder(modality, self.image_size)
-        self._data_keys = _AUDIO_KEYS if modality == "audio" else _IMAGE_KEYS
+        return shards
 
     def make_loader(self) -> DataLoader:
         import webdataset as wds

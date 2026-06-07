@@ -1,0 +1,53 @@
+# Format matrix (G1/G10) — PubLayNet >RAM local run.
+#
+# Hypothesis: once the dataset is larger than RAM, page-cache effects become
+# visible and the storage format matters more than on Imagenette/Imagewoof. DFS
+# should remain competitive with ImageFolder/WebDataset in raw mode, while
+# datasetfs-rgb shows the server-side decode path without duplicating the on-disk
+# data. PubLayNet has no classification labels, so every image is assigned the
+# single dummy class `layout`; this benchmark is about I/O/transport throughput,
+# cache pressure, stalls, and system/daemon metrics, not loss/accuracy.
+#
+# Metric rationale:
+# - steady_samples_per_second: headline throughput after worker/pipeline warmup.
+# - time_to_first_batch: startup/cold-read cost, relevant for large datasets.
+# - stall_fraction and fetch p50/p95/p99: whether the model waits on the loader.
+# - sys CPU/RSS/disk bytes: separates CPU/decode limits from storage/cache limits.
+# - DFS /metrics: shard load bytes/latency, slot starvation, and refcount safety.
+#
+# Prep, disk discipline:
+#   python -m scripts.datasets.prepare_formats publaynet --n-shards 85 \
+#       --formats imagefolder webdataset datasetfs
+#
+# raw + webdataset + datasetfs are large; use scripts/storage/ydisk.py to archive
+# inactive datasets before preparing this. `drop_page_cache_between_cells` is off:
+# the >RAM working set itself is the cache-defeat mechanism, and sudo cache-drop
+# is host-dependent.
+
+dataset:
+  name: publaynet
+  imagefolder: data/formats/publaynet/imagefolder
+  webdataset: data/formats/publaynet/webdataset
+  datasetfs: data/formats/publaynet/datasetfs
+
+model: simplecnn
+batch_size: 64
+num_workers: 4
+image_size: 96
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 160
+warmup_batches: 10
+
+seeds: [0, 1, 2]
+
+loaders:
+  - imagefolder
+  - webdataset
+  - datasetfs
+  - {format: datasetfs, name: datasetfs-rgb, dfs_decode_mode: rgb_uint8, dfs_decode_parallelism: 0}
+
+drop_page_cache_between_cells: false
+
+daemon_binary: bin/datasetfs

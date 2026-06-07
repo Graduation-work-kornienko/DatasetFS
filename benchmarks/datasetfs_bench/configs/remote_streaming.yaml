@@ -1,0 +1,52 @@
+# Remote streaming comparison (DatasetFS HTTP remote vs WebDataset HTTP).
+#
+# This config intentionally contains placeholder URLs. The runner does not upload
+# or download large datasets implicitly; stage matching DatasetFS/WebDataset
+# artifacts on the same HTTP origin, then override the URLs before running.
+#
+# Expected layout:
+#   DatasetFS remote root:   http://host/datasetfs_root/  (metadata.jsonl + shards)
+#   WebDataset remote base:  http://host/webdataset/      (shard-000000.tar, ...)
+#
+# Both loaders are throttled to the same nominal bandwidth:
+#   - DatasetFS: daemon --remote-throttle bytes/sec
+#   - WebDataset: curl --limit-rate via wds_http_mode=curl
+
+dataset:
+  name: remote_streaming
+  imagefolder: data/formats/imagenette/imagefolder
+  webdataset: data/formats/imagenette/webdataset
+  datasetfs: data/formats/imagenette/datasetfs
+  webdataset_remote:
+    http_base: http://127.0.0.1:8000/webdataset
+    num_shards: 1
+    shard_pattern: shard-{i:06d}.tar
+    wds_http_mode: curl
+    wds_curl_limit_rate: 20m
+
+datasetfs_remote:
+  root_url: http://127.0.0.1:8000/datasetfs
+  cache_dir: runs/remote_cache
+  prefetch_concurrency: 2
+  remote_throttle: 20971520
+
+model: simplecnn
+batch_size: 64
+num_workers: 2
+image_size: 96
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 80
+warmup_batches: 5
+
+seeds: [0, 1, 2]
+
+loaders:
+  - {format: webdataset, name: webdataset-remote}
+  - {format: datasetfs, name: datasetfs-remote}
+
+drop_page_cache_between_cells: false
+daemon_metrics_interval_s: 0.5
+
+daemon_binary: bin/datasetfs

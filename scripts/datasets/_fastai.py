@@ -67,30 +67,42 @@ SPEECH_COMMANDS_V2 = FastaiDataset(
 ALL_DATASETS = (IMAGENETTE2, IMAGEWOOF2, SPEECH_COMMANDS_V2)
 
 
-def download_with_progress(url: str, dest: Path, chunk_size: int = 1024 * 1024) -> None:
+def download_with_progress(url: str, dest: Path, chunk_size: int = 1024 * 1024,
+                           retries: int = 5) -> None:
     """Stream-download a URL to dest, printing progress."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".partial")
-    print(f"[download] {url} → {dest}", flush=True)
-    with requests.get(url, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        downloaded = 0
-        last_print = time.time()
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(chunk_size=chunk_size):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                downloaded += len(chunk)
-                now = time.time()
-                if now - last_print > 2.0:
-                    pct = (100 * downloaded / total) if total else 0
-                    mb = downloaded / 1e6
-                    print(f"  {mb:.1f} MB ({pct:.1f}%)", flush=True)
-                    last_print = now
-    tmp.rename(dest)
-    print(f"[download] done: {dest}", flush=True)
+    for attempt in range(1, retries + 1):
+        tmp.unlink(missing_ok=True)
+        print(f"[download] {url} → {dest} (attempt {attempt}/{retries})", flush=True)
+        try:
+            with requests.get(url, stream=True, timeout=120) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                downloaded = 0
+                last_print = time.time()
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=chunk_size):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        now = time.time()
+                        if now - last_print > 2.0:
+                            pct = (100 * downloaded / total) if total else 0
+                            mb = downloaded / 1e6
+                            print(f"  {mb:.1f} MB ({pct:.1f}%)", flush=True)
+                            last_print = now
+            tmp.rename(dest)
+            print(f"[download] done: {dest}", flush=True)
+            return
+        except (requests.RequestException, OSError) as exc:
+            tmp.unlink(missing_ok=True)
+            if attempt == retries:
+                raise
+            wait = min(60, 2 ** attempt)
+            print(f"[download] retry after error: {exc} (sleep {wait}s)", flush=True)
+            time.sleep(wait)
 
 
 def extract_tgz(tgz: Path, dest: Path) -> None:

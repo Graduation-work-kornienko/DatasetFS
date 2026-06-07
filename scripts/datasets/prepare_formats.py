@@ -17,6 +17,11 @@ import sys
 from pathlib import Path
 
 from scripts.datasets._fastai import ALL_DATASETS, FastaiDataset, ensure_dataset
+from scripts.datasets._publaynet import PUBLAYNET, PubLayNetDataset, ensure_publaynet
+
+# All datasets the CLI can prepare. PubLayNet is acquired from HF Parquet (not a
+# fastai .tgz) so it carries its own acquisition path; see prepare()'s dispatch.
+KNOWN_DATASETS = ALL_DATASETS + (PUBLAYNET,)
 
 
 ALL_FORMATS = (
@@ -355,8 +360,14 @@ def prepare_datasetfs(ds: FastaiDataset, class_root: Path, out: Path, repo_root:
     print(f"[done] {ds.name}/datasetfs", flush=True)
 
 
-def prepare(ds: FastaiDataset, data_root: Path, repo_root: Path, formats: tuple[str, ...]) -> None:
-    extracted = ensure_dataset(ds, data_root)
+def prepare(ds, data_root: Path, repo_root: Path, formats: tuple[str, ...],
+            n_shards: int | None = None) -> None:
+    # Acquisition dispatch: fastai datasets download a .tgz; PubLayNet pulls HF
+    # Parquet shards. Both return an extracted root with a <train>/<class>/ tree.
+    if isinstance(ds, PubLayNetDataset):
+        extracted = ensure_publaynet(ds, data_root, n_shards=n_shards)
+    else:
+        extracted = ensure_dataset(ds, data_root)
     formats_root = data_root / "formats" / ds.name
 
     # ImageFolder is the canonical filtered source — every other format builds
@@ -384,13 +395,22 @@ def prepare(ds: FastaiDataset, data_root: Path, repo_root: Path, formats: tuple[
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("names", nargs="*", help="Dataset name(s); default: all")
+    parser.add_argument("names", nargs="*", help="Dataset name(s); default: all fastai datasets")
     parser.add_argument("--data-root", default="data")
     parser.add_argument("--formats", nargs="*", default=ALL_FORMATS, choices=ALL_FORMATS)
+    parser.add_argument("--n-shards", type=int, default=None,
+                        help="PubLayNet only: number of HF train Parquet shards to pull "
+                             "(default 85 ≈ 40 GB extracted).")
+    parser.add_argument("--rm-raw-after", action="store_true",
+                        help="Delete data/raw/<ds> after all formats are built (the "
+                             "self-contained formats no longer need it; imagefolder, "
+                             "which symlinks into raw, is excluded if this is set).")
     args = parser.parse_args()
 
+    # Default name set = the fastai datasets (PubLayNet is large/explicit → opt-in).
     requested = set(args.names) if args.names else {ds.name for ds in ALL_DATASETS}
-    unknown = requested - {ds.name for ds in ALL_DATASETS}
+    known = {ds.name for ds in KNOWN_DATASETS}
+    unknown = requested - known
     if unknown:
         parser.error(f"unknown dataset(s): {unknown}")
 
@@ -398,9 +418,14 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent.parent
     formats = tuple(args.formats)
 
-    for ds in ALL_DATASETS:
+    for ds in KNOWN_DATASETS:
         if ds.name in requested:
-            prepare(ds, data_root, repo_root, formats)
+            prepare(ds, data_root, repo_root, formats, n_shards=args.n_shards)
+            if args.rm_raw_after:
+                raw = data_root / "raw" / ds.name
+                if raw.exists():
+                    print(f"[rm-raw] {raw}", flush=True)
+                    shutil.rmtree(raw)
 
     return 0
 

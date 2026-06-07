@@ -233,3 +233,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+diploma/
+DIPLOMA_DRAFT.md
+HANDOFF.md
+*.docx
+*.doc
+testdata/
+
+profiling/
+!profiling/raw_transport_bench.py
+!profiling/ttfb_probe.py
+.DS_Store

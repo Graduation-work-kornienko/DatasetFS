@@ -260,10 +260,9 @@ def test_remote_prefetch_and_training(daemon_binary, datasetfs_dir, minio_bucket
     daemon = _RemoteDaemon(daemon_binary, root_url, cache_dir)
     daemon.start()
     try:
-        # 1. Prefetch must have populated the local cache from MinIO.
-        cached_shards = sorted(p.name for p in cache_dir.glob("shard_*") if p.name != "shard_-1")
+        # 1. Streaming-overlap fetches only the manifest at daemon startup. Shards
+        # arrive in the background / on demand while training drains the epoch.
         expected = sorted(p.name for p in datasetfs_dir.glob("shard_*") if p.name != "shard_-1")
-        assert cached_shards == expected, f"cache {cached_shards} != dataset {expected}"
         assert (cache_dir / "metadata.parquet").exists(), "manifest not prefetched"
 
         # 2. Build labels and a DatasetFS loader against the running daemon.
@@ -297,6 +296,8 @@ def test_remote_prefetch_and_training(daemon_binary, datasetfs_dir, minio_bucket
 
         assert seen > 0, "no samples were delivered from the remote dataset"
         assert first_loss is not None and np.isfinite(first_loss)
+        cached_shards = sorted(p.name for p in cache_dir.glob("shard_*") if p.name != "shard_-1")
+        assert cached_shards == expected, f"cache {cached_shards} != dataset {expected}"
         print(f"[remote-minio] trained on {seen} samples from {root_url}, first loss={first_loss:.3f}")
     finally:
         daemon.stop()

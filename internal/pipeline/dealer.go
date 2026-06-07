@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/index"
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/metrics"
@@ -99,8 +100,10 @@ func DealerWorker(
 	// locking is needed. Avoids a per-batch allocation on the hot path.
 	var frameBuf bytes.Buffer
 	emit := func(items []*Metadata) error {
+		start := time.Now()
 		encodeFrame(&frameBuf, items, gen)
 		_, err := pipeFile.Write(frameBuf.Bytes())
+		metrics.DealerEmitLatency.Record(time.Since(start))
 		return err
 	}
 

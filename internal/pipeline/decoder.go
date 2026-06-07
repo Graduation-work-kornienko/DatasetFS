@@ -7,7 +7,9 @@ import (
 	_ "image/png" // register PNG decoder for image.Decode dispatch
 	"log"
 	"sync"
+	"time"
 
+	"github.com/Graduation-work-kornienko/DatasetFS/internal/metrics"
 	"golang.org/x/image/draw"
 
 	"github.com/Graduation-work-kornienko/DatasetFS/internal/shm"
@@ -185,7 +187,9 @@ func (d *Decoder) Launch(ctx context.Context) {
 				return
 			}
 			slotBuf := d.allocator.GetSlotBuffer(meta.SlotID)
+			decodeStart := time.Now()
 			out, used := d.decodeSlot(slotBuf, meta, perItem, w, h)
+			metrics.DecodeLatency.Record(time.Since(decodeStart))
 			if len(out) == 0 {
 				// Every item failed to decode — release the slot so the
 				// loader pool stays drained-correct.
@@ -199,7 +203,9 @@ func (d *Decoder) Launch(ctx context.Context) {
 			// Replace slot contents with the packed decoded data. Safe to do
 			// because the only other reader of this slot — Python — has not
 			// yet been told the slot has data (we send to `out` below).
+			shmStart := time.Now()
 			copy(slotBuf[:used], d.scratch[:used])
+			metrics.SHMWriteLatency.Record(time.Since(shmStart))
 
 			select {
 			case <-ctx.Done():

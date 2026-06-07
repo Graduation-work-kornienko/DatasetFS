@@ -139,7 +139,10 @@ def _build_loader(loader_name: str, cfg: dict, label_to_idx: dict, seed: int):
     if loader_name == "imagefolder":
         return cls({**common, "root": ds["imagefolder"]})
     if loader_name == "webdataset":
-        return cls({**common, "root": ds["webdataset"]})
+        spec = {**common, "root": ds["webdataset"]}
+        if "webdataset_remote" in ds:
+            spec.update(ds["webdataset_remote"])
+        return cls(spec)
     if loader_name == "datasetfs":
         spec = {**common, "root": ds["datasetfs"]}
         # Modality selects the client decode path: "image" (default, PIL or
@@ -175,7 +178,7 @@ def _run_one_cell(
     seed: int,
     out_dir: Path,
     daemon: DaemonManager | None,
-) -> tuple[list[EpochStats], dict, dict]:
+) -> tuple[list[tuple[EpochStats, dict]], dict, dict, list[dict[str, Any]]]:
     """Run one (loader, seed) cell, returning (epoch_stats, system_summary, daemon_summary).
 
     `display_name` is the bar label (may differ from `loader_format` when a
@@ -201,20 +204,34 @@ def _run_one_cell(
     if loader_format == "datasetfs" and daemon is not None and daemon.pid is not None:
         track_pids.append(daemon.pid)
 
-    sampler = SystemSampler(interval_s=0.2, track_pids=track_pids)
+    track_labels = {"python": os.getpid()}
+    if loader_format == "datasetfs" and daemon is not None and daemon.pid is not None:
+        track_labels["daemon"] = daemon.pid
+    sampler = SystemSampler(interval_s=0.2, track_pids=track_pids, track_labels=track_labels)
+    daemon_sampler = None
+    if loader_format == "datasetfs":
+        daemon_sampler = daemon_metrics.DaemonSampler(
+            interval_s=float(cfg.get("daemon_metrics_interval_s", 0.5)),
+            context={"loader": display_name, "seed": seed},
+        )
     daemon_before = daemon_metrics.snapshot() if loader_format == "datasetfs" else {}
 
     sampler.start()
-    stats: list[EpochStats] = []
+    if daemon_sampler is not None:
+        daemon_sampler.start()
+    stats: list[tuple[EpochStats, dict]] = []
     try:
         for epoch in range(cfg["epochs"]):
             dl = loader.make_loader()
+            epoch_daemon_before = daemon_metrics.snapshot() if loader_format == "datasetfs" else {}
             ep_stats = train_one_epoch(
                 model, dl, optim, loss_fn,
                 epoch_idx=epoch,
                 max_batches=cfg.get("max_batches_per_epoch"),
                 warmup_batches=cfg.get("warmup_batches", 0),
             )
+            epoch_daemon_after = daemon_metrics.snapshot() if loader_format == "datasetfs" else {}
+            epoch_daemon_summary = daemon_metrics.cell_summary(epoch_daemon_before, epoch_daemon_after)
             print(
                 f"  epoch={epoch} sps={ep_stats.samples_per_second:.1f} "
                 f"steady_sps={ep_stats.steady_samples_per_second:.1f} "
@@ -222,16 +239,19 @@ def _run_one_cell(
                 f"stall={ep_stats.stall_fraction:.2%}",
                 flush=True,
             )
-            stats.append(ep_stats)
+            stats.append((ep_stats, epoch_daemon_summary))
             # Drop the DataLoader workers between epochs to avoid pipe state
             # bleeding across epochs.
             del dl
     finally:
+        if daemon_sampler is not None:
+            daemon_sampler.stop()
         sampler.stop()
         loader.teardown()
 
     daemon_after = daemon_metrics.snapshot() if loader_format == "datasetfs" else {}
-    return stats, sampler.summary(), daemon_metrics.cell_summary(daemon_before, daemon_after)
+    daemon_samples = daemon_sampler.samples if daemon_sampler is not None else []
+    return stats, sampler.summary(), daemon_metrics.cell_summary(daemon_before, daemon_after), daemon_samples
 
 
 def _write_summary(out_dir: Path, rows: list[dict]) -> None:
@@ -274,11 +294,16 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
     # inside _run_one_cell), and the decode-mode override is sent per cell.
     daemon: DaemonManager | None = None
     if any(fmt == "datasetfs" for _, fmt, _ in cells):
+        remote = cfg.get("datasetfs_remote") or {}
+        root_path = remote.get("root_url") or Path(cfg["dataset"]["datasetfs"]).resolve()
         daemon = DaemonManager(
             binary=REPO_ROOT / cfg["daemon_binary"],
-            root_path=Path(cfg["dataset"]["datasetfs"]).resolve(),
+            root_path=root_path,
             cwd=REPO_ROOT,
             log_path=out_dir / "daemon.log",
+            cache_dir=remote.get("cache_dir"),
+            prefetch_concurrency=remote.get("prefetch_concurrency"),
+            remote_throttle=remote.get("remote_throttle"),
         )
 
     drop_caches = cfg.get("drop_page_cache_between_cells", False)
@@ -294,6 +319,7 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
         drop_caches = False
 
     summary_rows: list[dict] = []
+    daemon_timeseries_rows: list[dict[str, Any]] = []
     try:
         for display_name, loader_format, overrides in cells:
             cfg_eff = {**cfg, **overrides}
@@ -307,7 +333,7 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
                         cache_state = "uncontrolled"
 
                 try:
-                    ep_stats, sys_summary, dmn_summary = _run_one_cell(
+                    ep_stats, sys_summary, dmn_summary, dmn_timeseries = _run_one_cell(
                         display_name, loader_format, cfg_eff, label_to_idx, seed, out_dir, daemon,
                     )
                 except FormatUnavailable as e:
@@ -315,7 +341,7 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
                     # prepared). Log and skip the rest of this loader's seeds.
                     print(f"[runner] SKIP {display_name}: {e}", flush=True)
                     break
-                for ep in ep_stats:
+                for ep, ep_dmn_summary in ep_stats:
                     row: dict[str, Any] = {
                         "loader": display_name,
                         "seed": seed,
@@ -327,9 +353,13 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
                     # attach them to every epoch row to keep the schema flat.
                     # Plot code can dedupe by (loader, seed) when needed.
                     row.update({f"sys_{k}": v for k, v in sys_summary.items()})
+                    row.update({f"epoch_{k}": v for k, v in ep_dmn_summary.items()})
                     row.update(dmn_summary)
                     summary_rows.append(row)
                 _write_summary(out_dir, summary_rows)  # incremental persist
+                if dmn_timeseries:
+                    daemon_timeseries_rows.extend(dmn_timeseries)
+                    daemon_metrics.write_rows_union(out_dir / "daemon_timeseries.csv", daemon_timeseries_rows)
     finally:
         if daemon is not None:
             daemon.stop()

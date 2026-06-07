@@ -128,11 +128,11 @@ P0+P1 тесты (по терминологии плана):
 | # | Gap | Зачем нужен | Сложность |
 |---|---|---|---|
 | ~~1~~ | ~~**Long-running stability**~~ | ~~Refcount drift, FD/goroutine/memory leaks~~ | ~~Done~~ |
-| 2 | **Concurrent loaders failure mode** | Два `DatasetFS()` в одном Python-процессе. Сейчас почти точно сломано (single daemon, single allocator). Тест должен проверить, что **сбой clean** (raise, не silent corruption) | low |
-| 3 | **Daemon crash mid-epoch** | Сейчас Python таймаутит на 30s. Должен возвращать структурированную ошибку | medium |
-| 4 | **Cleanup verification** | После `daemon.stop()` проверять, что нет FD-leak (`lsof | grep mlfs`), нет `/tmp/mlfs_*`, нет `datasetfs_pipe_*`. Чистим в фикстуре, но никогда не assert'им | low |
-| 5 | **FUSE-mount mode** | `internal/vfs/` (POSIX-чтение через mount-point) не покрыт. Имеет смысл, если кто-то реально использует mount-point. Бенчмарки идут с `--no-mount` | medium-high |
-| 6 | **Mutations** (`DeleteFile` / `AddDeltaFile`) | `internal/manager/mutation_manager.go` есть, тестов нет. Релевантно, **если** mutations попадут в бенчмарки (концепция в плане: concurrent training + mutations — уникальная фича DFS) | medium |
+| ~~2~~ | ~~**Concurrent loaders failure mode**~~ | ~~Покрыто `tests/test_deferred_gaps.py`: session-specific FIFO paths не дают stale iterator и новой эпохе делить один pipe; старый iterator завершается bounded EOF/error или дочитывает корректные данные~~ | ~~done~~ |
+| 3 | **Daemon crash mid-epoch** | Покрыто `tests/test_deferred_gaps.py`: kill daemon во время итерации должен завершиться bounded failure, без бесконечного hang | done |
+| 4 | **Cleanup verification** | Покрыто `tests/test_deferred_gaps.py`: после `daemon.stop()` assert'им отсутствие `/tmp/mlfs_*` и `datasetfs_pipe_*` | done |
+| ~~5~~ | ~~**FUSE-mount mode**~~ | ~~Покрыто `tests/test_deferred_gaps.py`: POSIX create/read/list/unlink через FUSE mount работает; `Create` обновляет inode metadata после commit в delta shard~~ | ~~done~~ |
+| 6 | **Mutations** (`DeleteFile` / `AddDeltaFile`) | Покрыто `tests/test_mutation_consistency.py`: real FUSE writes/deletes + DatasetFS epoch snapshot consistency | done |
 
 Полный контекст: [memory/project_deferred_tests.md](../.claude/projects/-Users-true-danil-12-Graduation-work-DatasetFS/memory/project_deferred_tests.md).
 

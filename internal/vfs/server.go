@@ -166,20 +166,22 @@ func (r *RootNode) Create(ctx context.Context, name string, flags uint32, mode u
 	out.Mode = fuse.S_IFREG | mode
 
 	writeHandle := &WriteHandle{
-		name:    name,
-		tmpFile: tmpFile,
-		mutMgr:  r.MutMgr,
-		coreIdx: r.CoreIdx,
+		name:     name,
+		tmpFile:  tmpFile,
+		mutMgr:   r.MutMgr,
+		coreIdx:  r.CoreIdx,
+		fileNode: fileNode,
 	}
 
 	return r.NewInode(ctx, fileNode, fs.StableAttr{Mode: out.Mode}), writeHandle, 0, 0
 }
 
 type WriteHandle struct {
-	name    string
-	tmpFile *os.File
-	mutMgr  *manager.MutationManager
-	coreIdx *index.CoreIndex
+	name     string
+	tmpFile  *os.File
+	mutMgr   *manager.MutationManager
+	coreIdx  *index.CoreIndex
+	fileNode *FileNode
 }
 
 var _ = (fs.FileWriter)((*WriteHandle)(nil))
@@ -205,6 +207,14 @@ func (w *WriteHandle) Release(ctx context.Context) syscall.Errno {
 	if err != nil {
 		return syscall.EIO
 	}
+
+	w.coreIdx.Mu.RLock()
+	meta := w.coreIdx.FileMap[w.name]
+	w.coreIdx.Mu.RUnlock()
+	if meta == nil || meta.Deleted {
+		return syscall.EIO
+	}
+	w.fileNode.meta = meta
 
 	return 0
 }

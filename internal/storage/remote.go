@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	internalio "github.com/Graduation-work-kornienko/DatasetFS/internal/io"
 )
 
 // RemoteStorage handles downloading and caching of remote files
@@ -16,15 +18,28 @@ type RemoteStorage struct {
 	client   *http.Client
 	mu       sync.Mutex
 	cache    map[string]string // URL to local path
+	limiter  *internalio.Limiter
 }
 
 // NewRemoteStorage creates a new RemoteStorage with the specified cache directory
-func NewRemoteStorage(cacheDir string) *RemoteStorage {
+func NewRemoteStorage(cacheDir string, throttleBytesPerSec ...int64) *RemoteStorage {
+	var limiter *internalio.Limiter
+	if len(throttleBytesPerSec) > 0 && throttleBytesPerSec[0] > 0 {
+		limiter = internalio.NewLimiter(throttleBytesPerSec[0])
+	}
 	return &RemoteStorage{
 		CacheDir: cacheDir,
 		client:   &http.Client{},
 		cache:    make(map[string]string),
+		limiter:  limiter,
 	}
+}
+
+func (rs *RemoteStorage) limitedBody(r io.Reader) io.Reader {
+	if rs.limiter == nil {
+		return r
+	}
+	return internalio.NewLimitedReader(r, rs.limiter)
 }
 
 // Download downloads a file from a URL and returns the local path
@@ -67,7 +82,7 @@ func (rs *RemoteStorage) Download(ctx context.Context, url string) (string, erro
 	}
 
 	// Copy response body to file
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+	if _, err := io.Copy(tmpFile, rs.limitedBody(resp.Body)); err != nil {
 		return "", fmt.Errorf("failed to copy response body: %w", err)
 	}
 
@@ -130,7 +145,7 @@ func (rs *RemoteStorage) Fetch(ctx context.Context, url, dst string) error {
 		return fmt.Errorf("create temp: %w", err)
 	}
 	tmpName := tmp.Name()
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	if _, err := io.Copy(tmp, rs.limitedBody(resp.Body)); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
 		return fmt.Errorf("write %s: %w", dst, err)

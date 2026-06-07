@@ -108,6 +108,14 @@ func PipePath(workerID int) string {
 	return fmt.Sprintf("/tmp/datasetfs_pipe_%d", workerID)
 }
 
+func SessionPipePath(sessionID uint64, workerID int) string {
+	return fmt.Sprintf("/tmp/datasetfs_pipe_%d_%d", sessionID, workerID)
+}
+
+func SessionPipeTemplate(sessionID uint64) string {
+	return fmt.Sprintf("/tmp/datasetfs_pipe_%d_{worker_id}", sessionID)
+}
+
 // resolveParallelism picks the decode worker count per pipeline. An explicit
 // requested value (>0) wins. Otherwise auto = NumCPU/numWorkers (floored at 1),
 // so the total decode goroutines across all pipelines (numWorkers*K) stays

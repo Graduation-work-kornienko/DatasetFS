@@ -1,12 +1,14 @@
 package io
 
 import (
+	"sync"
 	"time"
 )
 
 // Limiter controls the rate of I/O operations
 
 type Limiter struct {
+	mu       sync.Mutex
 	rate     int64 // bytes per second
 	lastTick time.Time
 	tokens   int64
@@ -25,6 +27,8 @@ func (l *Limiter) Wait(n int) {
 	if l.rate == 0 {
 		return // Unlimited
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	l.tokens -= int64(n)
 	if l.tokens < 0 {
