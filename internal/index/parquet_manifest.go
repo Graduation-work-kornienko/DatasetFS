@@ -1,7 +1,6 @@
 package index
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -13,8 +12,8 @@ import (
 // ParquetManifest represents the manifest data structure for Parquet format
 type ParquetManifest struct {
 	Version    string             `parquet:"version"`
-	ShardsMeta []ParquetShardMeta `parquet:"shards_meta"`
-	Files      []ParquetFileEntry `parquet:"files"`
+	ShardsMeta []ParquetShardMeta `parquet:"shards_meta,list"`
+	Files      []ParquetFileEntry `parquet:"files,list"`
 }
 
 // ParquetShardMeta represents shard metadata for Parquet format
@@ -140,24 +139,4 @@ func StoreParquetManifest(m *Manifest) error {
 	}
 
 	return nil
-}
-
-// ConvertJSONManifestToParquet converts a JSON manifest to Parquet format
-func ConvertJSONManifestToParquet(root string) error {
-	// First load the JSON manifest
-	jsonPath := filepath.Join(root, "metadata.jsonl")
-	jsonFile, err := os.Open(jsonPath)
-	if err != nil {
-		return fmt.Errorf("open json manifest %s: %w", jsonPath, err)
-	}
-	defer jsonFile.Close()
-
-	var manifest Manifest
-	if err := json.NewDecoder(jsonFile).Decode(&manifest); err != nil {
-		return fmt.Errorf("decode json manifest: %w", err)
-	}
-	manifest.Root = root
-
-	// Convert and store as Parquet
-	return StoreParquetManifest(&manifest)
 }

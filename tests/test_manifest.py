@@ -5,21 +5,17 @@ list shards whose files don't exist (or are wrong size). Catch that statically.
 """
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 
 import pytest
+from scripts.datasets.datasetfs_writer import read_parquet_manifest
 
 
 pytestmark = pytest.mark.timeout(60)
 
 
 def _load_manifest(datasetfs_root: Path) -> dict:
-    """The manifest filename in this repo is `metadata.jsonl` despite being
-    a single JSON object."""
-    with open(datasetfs_root / "metadata.jsonl") as f:
-        return json.load(f)
+    return read_parquet_manifest(datasetfs_root)
 
 
 def _check_dataset(datasetfs_root: Path) -> None:

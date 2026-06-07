@@ -26,6 +26,17 @@ def snapshot(url: str = "http://localhost:51409", timeout: float = 2.0) -> dict:
         return {}
 
 
+def pipeline_snapshot(url: str = "http://localhost:51409", timeout: float = 2.0) -> dict:
+    """Return /metrics/pipeline, focused on pipeline-stage timings."""
+    try:
+        r = requests.get(f"{url}/metrics/pipeline", timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[daemon-metrics] pipeline scrape failed: {e}", flush=True)
+        return {}
+
+
 def cell_summary(before: dict, after: dict) -> dict[str, Any]:
     """Build a flat dict suitable for one row in summary.csv.
 

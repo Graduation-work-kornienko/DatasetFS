@@ -23,7 +23,7 @@ var (
 )
 
 // newConverterCmd builds the `converter` parent command grouping the format
-// converters (dataset-folder, webdataset, convert-manifest).
+// converters (dataset-folder, webdataset).
 func newConverterCmd() *cobra.Command {
 	converterCmd := &cobra.Command{
 		Use:   "converter",
@@ -49,18 +49,8 @@ func newConverterCmd() *cobra.Command {
 		RunE:  generateConvertCommand(ParseWebDataset),
 	}
 
-	convertManifest := &cobra.Command{
-		Use:   "convert-manifest",
-		Short: "Convert a JSON manifest to Parquet format",
-		Long:  "Convert an existing JSON manifest to Parquet format for improved efficiency",
-		RunE:  convertManifestCmd,
-	}
-	convertManifest.Flags().StringP("source", "s", "", "Source directory containing the JSON manifest to convert")
-	convertManifest.MarkFlagRequired("source")
-
 	converterCmd.AddCommand(datasetFolder)
 	converterCmd.AddCommand(webDataset)
-	converterCmd.AddCommand(convertManifest)
 	return converterCmd
 }
 

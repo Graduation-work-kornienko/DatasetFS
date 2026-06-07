@@ -25,19 +25,20 @@ import (
 // vacuumer, and (unless --no-mount) mounts the FUSE filesystem.
 func newDaemonCmd() *cobra.Command {
 	var (
-		rootPath         string
-		mountPoint       string
-		noMount          bool
-		mutexProfileRate int
-		blockProfileRate int
+		rootPath            string
+		mountPoint          string
+		noMount             bool
+		mutexProfileRate    int
+		blockProfileRate    int
 		cacheDir            string
 		prefetchConcurrency int
 		remoteThrottle      int64
 		walFormat           string
+		disableWAL          bool
 		autoVacuum          bool
-		vacuumInterval   time.Duration
-		vacuumThreshold  float64
-		vacuumThrottle   int64
+		vacuumInterval      time.Duration
+		vacuumThreshold     float64
+		vacuumThrottle      int64
 	)
 
 	cmd := &cobra.Command{
@@ -93,29 +94,37 @@ func newDaemonCmd() *cobra.Command {
 				prefetcher.Start(cmd.Context())
 			}
 
-			// Open WAL early so MutationManager can write to it, and so Replay
-			// below recovers any mutations since the last manifest checkpoint.
-			wal, err := index.OpenWALWithFormat(localRoot, walFormat)
-			if err != nil {
-				return fmt.Errorf("open WAL: %w", err)
+			var wal index.WAL
+			if !disableWAL {
+				// Open WAL early so MutationManager can write to it, and so Replay
+				// below recovers any mutations since the last manifest checkpoint.
+				wal, err = index.OpenWALWithFormat(localRoot, walFormat)
+				if err != nil {
+					return fmt.Errorf("open WAL: %w", err)
+				}
 			}
 
 			go control.StartServer(coreIdx, strg)
 
 			mutMgr := manager.NewMutationManager(coreIdx, mnfst, wal, strg)
 
-			// Replay AFTER NewMutationManager so the delta shard placeholder
-			// (id=-1) is in coreIdx — replay's AddFile entries reference it.
-			if applied, err := wal.Replay(coreIdx); err != nil {
-				return fmt.Errorf("WAL replay failed: %w (recover by inspecting/deleting %s)", err, wal.Path())
-			} else if applied > 0 {
-				log.Printf("WAL: replayed %d mutation(s) since last checkpoint", applied)
+			if wal != nil {
+				// Replay AFTER NewMutationManager so the delta shard placeholder
+				// (id=-1) is in coreIdx — replay's AddFile entries reference it.
+				if applied, err := wal.Replay(coreIdx); err != nil {
+					return fmt.Errorf("WAL replay failed: %w (recover by inspecting/deleting %s)", err, wal.Path())
+				} else if applied > 0 {
+					log.Printf("WAL: replayed %d mutation(s) since last checkpoint", applied)
+				}
 			}
 
 			// Background vacuumer (opt-in). Runs as a daemon goroutine — not a
 			// separate process — so it coordinates with the loading pipeline and
 			// FUSE mutations.
 			if autoVacuum {
+				if wal == nil {
+					return fmt.Errorf("--auto-vacuum requires WAL; remove --no-wal")
+				}
 				avCtx, avCancel := context.WithCancel(context.Background())
 				defer avCancel()
 				go runAutoVacuum(avCtx, autoVacuumConfig{
@@ -134,8 +143,10 @@ func newDaemonCmd() *cobra.Command {
 				<-c
 				log.Println("Saving manifest")
 				mutMgr.Shutdown()
-				if cerr := wal.Close(); cerr != nil {
-					log.Printf("wal.Close: %v", cerr)
+				if wal != nil {
+					if cerr := wal.Close(); cerr != nil {
+						log.Printf("wal.Close: %v", cerr)
+					}
 				}
 				log.Println("Daemon stopped")
 				return nil
@@ -182,8 +193,10 @@ func newDaemonCmd() *cobra.Command {
 
 			log.Println("Saving manifest")
 			mutMgr.Shutdown()
-			if cerr := wal.Close(); cerr != nil {
-				log.Printf("wal.Close: %v", cerr)
+			if wal != nil {
+				if cerr := wal.Close(); cerr != nil {
+					log.Printf("wal.Close: %v", cerr)
+				}
 			}
 			log.Println("Daemon stopped")
 			return nil
@@ -198,7 +211,8 @@ func newDaemonCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", "./dataset_cache", "Directory for caching remote datasets")
 	cmd.Flags().IntVar(&prefetchConcurrency, "prefetch-concurrency", 4, "Background download workers for remote streaming (overlap with training)")
 	cmd.Flags().Int64Var(&remoteThrottle, "remote-throttle", 0, "Limit aggregate remote download bandwidth in bytes/sec (0 = unlimited)")
-	cmd.Flags().StringVar(&walFormat, "wal-format", "json", "Format for WAL (supported: json and binary)")
+	cmd.Flags().StringVar(&walFormat, "wal-format", "binary", "Format for WAL (supported: json and binary)")
+	cmd.Flags().BoolVar(&disableWAL, "no-wal", false, "Disable WAL open/replay/write path. Intended for read-only benchmarks.")
 	cmd.Flags().BoolVar(&autoVacuum, "auto-vacuum", false, "Run the background vacuumer goroutine (compacts deleted files when idle)")
 	cmd.Flags().DurationVar(&vacuumInterval, "vacuum-interval", 5*time.Minute, "How often the background vacuumer checks fragmentation")
 	cmd.Flags().Float64Var(&vacuumThreshold, "vacuum-threshold", 0.3, "Fragmentation ratio (deleted/physical) that triggers a vacuum")

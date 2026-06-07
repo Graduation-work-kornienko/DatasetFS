@@ -1,7 +1,7 @@
 # Real-world DatasetFS universality suite.
 #
 # Intent: prove DatasetFS is not image-only by validating training/data iteration
-# on real 2-5GB-class datasets with different structures. Preparation is kept
+# on real 1-5GB-class datasets with different structures. Preparation is kept
 # separate from running because downloads are large and should be staged/archived.
 
 suite: real_universal
@@ -55,6 +55,25 @@ datasets:
     reference: data/raw/real_universal/wikipedia_en_slice
     model: text_probe
     batch_size: 64
+    formats:
+      - format: parquet
+        path: data/formats/real_universal/wikipedia_en_slice/parquet/data.parquet
+        modality: text
+
+  - name: amazon_polarity_slice
+    task: text_classification
+    modality: text
+    approx_size: "configurable 1.5GB materialized slice"
+    source: "HuggingFace fancyzhx/amazon_polarity streaming slice"
+    prepare: "python -m scripts.datasets.prepare_real_universal amazon_polarity_slice --target-gb 1.5"
+    datasetfs: data/formats/real_universal/amazon_polarity_slice/datasetfs
+    reference: data/raw/real_universal/amazon_polarity_slice
+    model: text_probe
+    batch_size: 64
+    formats:
+      - format: parquet
+        path: data/formats/real_universal/amazon_polarity_slice/parquet/data.parquet
+        modality: text
 
   - name: amazon_reviews_slice
     task: text_classification
@@ -66,6 +85,10 @@ datasets:
     reference: data/raw/real_universal/amazon_reviews_slice
     model: text_probe
     batch_size: 64
+    formats:
+      - format: parquet
+        path: data/formats/real_universal/amazon_reviews_slice/parquet/data.parquet
+        modality: text
 
   - name: flickr30k
     task: image_caption_multimodal
@@ -77,6 +100,21 @@ datasets:
     reference: data/raw/real_universal/flickr30k
     model: image_text_probe
     batch_size: 32
+
+  - name: ucf101_subset
+    task: video_action_classification
+    modality: video
+    approx_size: "~172MB short-video UCF101 subset"
+    source: "HuggingFace sayakpaul/ucf101-subset"
+    prepare: "python -m scripts.datasets.prepare_real_universal ucf101_subset --target-gb 1"
+    datasetfs: data/formats/real_universal/ucf101_subset/datasetfs
+    reference: data/raw/real_universal/ucf101_subset
+    model: video_probe
+    batch_size: 8
+    formats:
+      - format: folder
+        path: data/raw/real_universal/ucf101_subset/extracted
+        modality: video
 
   - name: publaynet_slice
     task: document_layout_multimodal

@@ -14,7 +14,7 @@ import (
 )
 
 // prefetchRemoteManifest fetches ONLY the manifest of a remote (HTTP) dataset
-// into cacheDir (parquet preferred, jsonl fallback) and builds a
+// into cacheDir and builds a
 // RemotePrefetcher over the base shards. It does NOT download the shards — that
 // happens lazily/in-background via the prefetcher, so the daemon can start
 // serving while shards are still arriving (streaming-overlap, thesis G9/G14).
@@ -32,18 +32,10 @@ func prefetchRemoteManifest(rs *storage.RemoteStorage, rootURL, cacheDir string,
 	base := strings.TrimRight(rootURL, "/")
 	ctx := context.Background()
 
-	// Manifest: try parquet, then jsonl.
-	gotManifest := false
-	for _, name := range []string{"metadata.parquet", "metadata.jsonl"} {
-		if err := rs.Fetch(ctx, base+"/"+name, filepath.Join(cacheDir, name)); err == nil {
-			gotManifest = true
-			log.Printf("[prefetch] manifest %s", name)
-			break
-		}
+	if err := rs.Fetch(ctx, base+"/metadata.parquet", filepath.Join(cacheDir, "metadata.parquet")); err != nil {
+		return "", nil, fmt.Errorf("no metadata.parquet at %s: %w", base, err)
 	}
-	if !gotManifest {
-		return "", nil, fmt.Errorf("no manifest (metadata.parquet/.jsonl) at %s", base)
-	}
+	log.Printf("[prefetch] manifest metadata.parquet")
 
 	mnfst := index.NewManifest(cacheDir)
 	if err := mnfst.Load(nil); err != nil {

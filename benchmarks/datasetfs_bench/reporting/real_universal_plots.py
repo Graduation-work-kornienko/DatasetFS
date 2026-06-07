@@ -34,7 +34,8 @@ def plot_real_universal(run_dir: Path, out_path: Path | None = None) -> Path:
 
     names = [r.get("name", f"dataset-{i}") for i, r in enumerate(rows)]
     modalities = [r.get("modality", "") for r in rows]
-    labels = [f"{n}\n{m}" if m else n for n, m in zip(names, modalities)]
+    formats = [r.get("format", "datasetfs") or "datasetfs" for r in rows]
+    labels = [f"{n}/{fmt}\n{m}" if m else f"{n}/{fmt}" for n, fmt, m in zip(names, formats, modalities)]
 
     throughput = [_f(r, "samples_per_s") for r in rows]
     cpu = [_f(r, "sys_cpu_pct_mean") for r in rows]
@@ -66,7 +67,7 @@ def plot_real_universal(run_dir: Path, out_path: Path | None = None) -> Path:
         ax.grid(axis="y", alpha=0.3)
         ax.set_axisbelow(True)
 
-    fig.suptitle("DatasetFS Real-Dataset Universality Probe", y=0.98)
+    fig.suptitle("Real-Dataset Universality Probe by Format", y=0.98)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     out = out_path or (run_dir / "real_universal.png")
     fig.savefig(out, dpi=160)

@@ -31,6 +31,8 @@ def test_system_timeseries_plot(tmp_path):
                 "daemon_cpu_percent": "10.0",
                 "disk_read_bytes": "1000",
                 "disk_write_bytes": "2000",
+                "disk_free_bytes": str(20 * 1024 ** 3),
+                "disk_used_bytes": str(100 * 1024 ** 3),
             },
             {
                 "t": "1.0",
@@ -43,6 +45,8 @@ def test_system_timeseries_plot(tmp_path):
                 "daemon_cpu_percent": "12.0",
                 "disk_read_bytes": str(2 * 1024 * 1024),
                 "disk_write_bytes": str(3 * 1024 * 1024),
+                "disk_free_bytes": str(19 * 1024 ** 3),
+                "disk_used_bytes": str(101 * 1024 ** 3),
             },
         ],
     )

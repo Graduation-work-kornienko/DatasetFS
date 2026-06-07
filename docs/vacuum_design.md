@@ -163,47 +163,20 @@ The manifest update process ensures atomic updates and maintains data consistenc
 
 The vacuum command uses a two-phase commit approach to ensure atomic updates:
 
-1. **Write to Temporary File**: The new manifest is written to `metadata.jsonl.tmp`
-2. **Atomic Rename**: The temporary file is atomically renamed to `metadata.jsonl`
+1. **Write Manifest**: The new manifest is written to `metadata.parquet`
+2. **WAL Truncation**: The WAL is truncated only after the Parquet manifest write succeeds
 
 This approach guarantees that the manifest is always in a consistent state, as POSIX systems guarantee that rename operations are atomic.
 
-```go
-func (m *Manifest) Store() error {
-	tempPath := filepath.Join(m.Root, "metadata.jsonl.tmp")
-	finalPath := filepath.Join(m.Root, "metadata.jsonl")
-
-	// Write to temporary file first
-	file, err := os.Create(tempPath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(m); err != nil {
-		return err
-	}
-
-	// Ensure data is written to disk
-	if err := file.Sync(); err != nil {
-		return err
-	}
-
-	// Close file before rename
-	file.Close()
-
-	// Atomic rename
-	return os.Rename(tempPath, finalPath)
-}
-```
+`Manifest.Store()` delegates to the Parquet manifest writer. The recovery rule is
+simple: a WAL may outlive the manifest, but the WAL is never truncated before the
+manifest checkpoint is durable.
 
 ### Update Steps
 
 1. **Create New Manifest**: Build a new manifest with updated shard mappings
-2. **Write to Temporary File**: Write new manifest to `metadata.jsonl.tmp`
-3. **Atomic Rename**: Rename temporary file to `metadata.jsonl`
+2. **Write Manifest**: Write new manifest to `metadata.parquet`
+3. **Truncate WAL**: Truncate the binary WAL after the manifest write succeeds
 4. **Cleanup**: Remove old shards that are no longer referenced
 
 ## 4. Error Handling and Recovery
@@ -271,8 +244,8 @@ func vacuum(rootPath string, dryRun, verbose bool, maxShardSize int64, preserveW
 }
 
 func createManifestBackup(rootPath string) error {
-	manifestPath := filepath.Join(rootPath, "metadata.jsonl")
-	backupPath := filepath.Join(rootPath, "metadata.jsonl.backup")
+	manifestPath := filepath.Join(rootPath, "metadata.parquet")
+	backupPath := filepath.Join(rootPath, "metadata.parquet.backup")
 
 	input, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -283,13 +256,13 @@ func createManifestBackup(rootPath string) error {
 }
 
 func removeManifestBackup(rootPath string) {
-	backupPath := filepath.Join(rootPath, "metadata.jsonl.backup")
+	backupPath := filepath.Join(rootPath, "metadata.parquet.backup")
 	os.Remove(backupPath)
 }
 
 func cleanupPartialOutputs(rootPath string) {
 	// Remove any temporary manifest files
-	tempManifest := filepath.Join(rootPath, "metadata.jsonl.tmp")
+	tempManifest := filepath.Join(rootPath, "metadata.parquet.tmp")
 	os.Remove(tempManifest)
 
 	// Note: We don't remove new shard files here as they might be needed for recovery
@@ -565,8 +538,8 @@ DatasetFS ensures atomic updates through a combination of file system operations
 
 ```go
 func (m *Manifest) Store() error {
-	tempPath := filepath.Join(m.Root, "metadata.jsonl.tmp")
-	finalPath := filepath.Join(m.Root, "metadata.jsonl")
+	tempPath := filepath.Join(m.Root, "metadata.parquet.tmp")
+	finalPath := filepath.Join(m.Root, "metadata.parquet")
 
 	// Write to temporary file first
 	file, err := os.Create(tempPath)

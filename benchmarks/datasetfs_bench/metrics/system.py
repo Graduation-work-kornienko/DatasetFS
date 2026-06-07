@@ -14,6 +14,7 @@ from __future__ import annotations
 import statistics
 import threading
 import time
+from pathlib import Path
 
 import psutil
 
@@ -37,10 +38,11 @@ class SystemSampler:
     """
 
     def __init__(self, interval_s: float = 0.2, track_pids: list[int] | None = None,
-                 track_labels: dict[str, int] | None = None):
+                 track_labels: dict[str, int] | None = None, disk_path: str | Path | None = None):
         self.interval_s = interval_s
         self.track_pids = list(track_pids or [])
         self.track_labels = dict(track_labels or {})
+        self.disk_path = Path(disk_path) if disk_path is not None else None
         for pid in self.track_labels.values():
             if pid not in self.track_pids:
                 self.track_pids.append(pid)
@@ -87,6 +89,15 @@ class SystemSampler:
                     sample["disk_write_bytes"] = io.write_bytes
             except Exception:
                 pass
+            if self.disk_path is not None:
+                try:
+                    usage = psutil.disk_usage(str(self.disk_path))
+                    sample["disk_total_bytes"] = usage.total
+                    sample["disk_used_bytes"] = usage.used
+                    sample["disk_free_bytes"] = usage.free
+                    sample["disk_used_percent"] = usage.percent
+                except Exception:
+                    pass
 
             # Per-tracked-process RSS + CPU sum (e.g. Python tree + daemon).
             rss_sum = 0
@@ -153,6 +164,9 @@ class SystemSampler:
         writes = [s["disk_write_bytes"] for s in self.samples if "disk_write_bytes" in s]
         rss = [s["tracked_rss_bytes"] for s in self.samples if "tracked_rss_bytes" in s]
         tracked_cpu = [s["tracked_cpu_percent"] for s in self.samples if "tracked_cpu_percent" in s]
+        disk_free = [s["disk_free_bytes"] for s in self.samples if "disk_free_bytes" in s]
+        disk_used = [s["disk_used_bytes"] for s in self.samples if "disk_used_bytes" in s]
+        disk_used_pct = [s["disk_used_percent"] for s in self.samples if "disk_used_percent" in s]
         duration = max(
             self.samples[-1].get("t", 0) - self.samples[0].get("t", 0),
             1e-9,
@@ -180,6 +194,17 @@ class SystemSampler:
         if tracked_cpu:
             out["tracked_cpu_pct_mean"] = statistics.mean(tracked_cpu)
             out["tracked_cpu_pct_p95"] = _percentile(tracked_cpu, 95)
+        if disk_free:
+            out["disk_free_min_bytes"] = min(disk_free)
+            out["disk_free_mean_bytes"] = statistics.mean(disk_free)
+            out["disk_free_delta_bytes"] = disk_free[-1] - disk_free[0]
+        if disk_used:
+            out["disk_used_max_bytes"] = max(disk_used)
+            out["disk_used_mean_bytes"] = statistics.mean(disk_used)
+            out["disk_used_delta_bytes"] = disk_used[-1] - disk_used[0]
+        if disk_used_pct:
+            out["disk_used_pct_mean"] = statistics.mean(disk_used_pct)
+            out["disk_used_pct_max"] = max(disk_used_pct)
         labels = set()
         for s in self.samples:
             for key in s:

@@ -69,9 +69,11 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 
 			targetSlice := b.allocator.GetSlotBuffer(job.SlotID)
 
-			shmStart := time.Now()
+			readStart := time.Now()
 			n, err := io.ReadFull(file, targetSlice[:job.Shard.TotalSize])
-			metrics.SHMWriteLatency.Record(time.Since(shmStart))
+			readElapsed := time.Since(readStart)
+			metrics.StorageReadLatency.Record(readElapsed)
+			metrics.SHMWriteLatency.Record(readElapsed)
 
 			if err != nil {
 				log.Printf("[Loader] ❌ Ошибка io.ReadFull для шарда %d: %v", job.ShardID, err)
@@ -83,6 +85,7 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 			metrics.ShardLoadsTotal.Add(1)
 			metrics.BytesReadTotal.Add(int64(n))
 
+			metaStart := time.Now()
 			var validMeta []*Metadata
 			globalSlotStartOffset := int64(job.SlotID * shm.SlotSize)
 
@@ -103,6 +106,7 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 				}
 
 			}
+			metrics.MetadataBuildLatency.Record(time.Since(metaStart))
 
 			log.Printf("[Loader] Загружен Слот %d , шард %d файлов %d (Валидных файлов: %d). Передаю Dealer.", job.SlotID, job.ShardID, len(job.Shard.Objects), len(validMeta))
 

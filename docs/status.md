@@ -144,7 +144,7 @@ WebDataset/HF/DFS. Самый объёмный пункт по числу гра
 
 - **Background vacuumer on/off (→ G4)** — throughput с `--auto-vacuum`, фрагментация
   по эпохам, latency в окна обслуживания.
-- **WAL формат (→ G5)** — JSONL vs binary WAL: write tput, размер лога, recovery.
+- **WAL формат (→ G5)** — binary WAL: write tput, размер лога, recovery.
 - **Манифест формат (→ G6)** — JSONL vs Parquet: load time, RAM, размер.
 - **Remote / S3 (→ G9 кривая + G14 выделенный сценарий)** — cold-start, prefetch
   overlap, cache hit ratio, end-to-end «учимся пока тянем» из remote.

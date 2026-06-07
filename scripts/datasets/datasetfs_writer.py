@@ -1,8 +1,8 @@
 """Small DatasetFS shard/manifest writer used by dataset preparation scripts.
 
-It writes uncompressed tar shards named ``shard_N`` plus ``metadata.jsonl`` in
-the manifest shape the Go daemon already loads. Payloads are arbitrary bytes;
-metadata is arbitrary JSON-serializable object metadata.
+It writes uncompressed tar shards named ``shard_N`` plus ``metadata.parquet`` in
+the manifest shape the Go daemon loads. Payloads are arbitrary bytes; metadata
+is arbitrary JSON-serializable object metadata stored as JSON bytes in Parquet.
 """
 from __future__ import annotations
 
@@ -12,6 +12,81 @@ import shutil
 import tarfile
 from pathlib import Path
 from typing import Any
+
+
+def write_parquet_manifest(out: Path, manifest: dict[str, Any]) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    out = Path(out)
+    shards = [
+        {
+            "number": int(shard_id),
+            "type": str(info["type"]),
+            "total_size": int(info["total_size"]),
+        }
+        for shard_id, info in sorted(manifest["shards_meta"].items(), key=lambda kv: int(kv[0]))
+    ]
+    files = [
+        {
+            "path": path,
+            "shard_id": int(info["c_id"]),
+            "offset": int(info["offset"]),
+            "size": int(info["size"]),
+            "deleted": bool(info.get("deleted", False)),
+            "object_metadata": json.dumps(info.get("meta") or {}, separators=(",", ":")).encode("utf-8"),
+        }
+        for path, info in sorted(manifest["files"].items())
+    ]
+    schema = pa.schema([
+        pa.field("version", pa.string(), nullable=False),
+        pa.field("shards_meta", pa.list_(pa.struct([
+            pa.field("number", pa.int32(), nullable=False),
+            pa.field("type", pa.string(), nullable=False),
+            pa.field("total_size", pa.int64(), nullable=False),
+        ])), nullable=False),
+        pa.field("files", pa.list_(pa.struct([
+            pa.field("path", pa.string(), nullable=False),
+            pa.field("shard_id", pa.int32(), nullable=False),
+            pa.field("offset", pa.int64(), nullable=False),
+            pa.field("size", pa.int64(), nullable=False),
+            pa.field("deleted", pa.bool_(), nullable=False),
+            pa.field("object_metadata", pa.binary(), nullable=False),
+        ])), nullable=False),
+    ])
+    table = pa.Table.from_pylist([
+        {"version": manifest["version"], "shards_meta": shards, "files": files}
+    ], schema=schema)
+    pq.write_table(table, out / "metadata.parquet")
+
+
+def read_parquet_manifest(root: Path) -> dict[str, Any]:
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(Path(root) / "metadata.parquet")
+    rows = table.to_pylist()
+    if not rows:
+        raise ValueError(f"empty DatasetFS manifest: {root}")
+    row = rows[0]
+    manifest = {"version": row["version"], "shards_meta": {}, "files": {}}
+    for shard in row["shards_meta"] or []:
+        manifest["shards_meta"][str(int(shard["number"]))] = {
+            "type": shard["type"],
+            "total_size": int(shard["total_size"]),
+        }
+    for item in row["files"] or []:
+        meta_raw = item.get("object_metadata") or b"{}"
+        if isinstance(meta_raw, str):
+            meta_raw = meta_raw.encode("utf-8")
+        manifest["files"][item["path"]] = {
+            "c_id": int(item["shard_id"]),
+            "offset": int(item["offset"]),
+            "size": int(item["size"]),
+            "deleted": bool(item["deleted"]),
+            "path": item["path"],
+            "meta": json.loads(meta_raw.decode("utf-8")),
+        }
+    return manifest
 
 
 class DatasetFSWriter:
@@ -44,8 +119,11 @@ class DatasetFSWriter:
                 "total_size": self.current,
             }
         if exc_type is None:
-            (self.out / "metadata.jsonl").write_text(json.dumps(self.manifest), encoding="utf-8")
+            self._write_parquet_manifest()
             (self.out / ".done").touch()
+
+    def _write_parquet_manifest(self) -> None:
+        write_parquet_manifest(self.out, self.manifest)
 
     def _next_shard(self) -> None:
         if self.tf is not None:

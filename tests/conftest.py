@@ -310,15 +310,13 @@ def flat_mounted_daemon(daemon_binary: Path, repo_root: Path, tmp_path: Path):
     learning path feature F1 must keep snapshot-consistent. Flat keys (no '/')
     sidestep the vfs's flat-namespace limitation. Skips if the FUSE mount can't be
     established (e.g. macFUSE absent). Yields (manager, mount_point: Path)."""
-    import json as _json
+    from scripts.datasets.datasetfs_writer import write_parquet_manifest
 
     ds_root = tmp_path / "flat_ds"
     ds_root.mkdir(parents=True, exist_ok=True)
     # Minimal empty manifest: 0 base shards, 0 files. The daemon seeds the delta
     # shard placeholder itself; all data arrives later via FUSE writes.
-    (ds_root / "metadata.jsonl").write_text(
-        _json.dumps({"version": "1.0", "shards_meta": {}, "files": {}})
-    )
+    write_parquet_manifest(ds_root, {"version": "1.0", "shards_meta": {}, "files": {}})
     mount_point = tmp_path / "mnt"
     manager = DaemonManager(
         binary=daemon_binary,

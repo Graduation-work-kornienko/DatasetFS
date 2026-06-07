@@ -28,6 +28,9 @@ class EpochStats:
     time_to_first_batch: float        # from iter start (incl. worker spawn) → first batch
     fetch_latency_seconds: list[float] = field(default_factory=list)
     compute_seconds: list[float] = field(default_factory=list)
+    zero_grad_seconds: list[float] = field(default_factory=list)
+    forward_backward_seconds: list[float] = field(default_factory=list)
+    optimizer_step_seconds: list[float] = field(default_factory=list)
     # Steady-state window: samples/time AFTER the first `warmup_batches` batches
     # are dropped. This excludes the one-time DataLoader worker-spawn + pipeline
     # priming cost UNIFORMLY across formats. Without it the wall-based number
@@ -59,6 +62,26 @@ class EpochStats:
         denom = total_fetch + total_compute
         return total_fetch / denom if denom > 0 else 0.0
 
+    @property
+    def batch_wait_fraction(self) -> float:
+        return self.stall_fraction
+
+
+    @property
+    def forward_backward_fraction(self) -> float:
+        total_fetch = sum(self.fetch_latency_seconds)
+        total_compute = sum(self.compute_seconds)
+        denom = total_fetch + total_compute
+        return sum(self.forward_backward_seconds) / denom if denom > 0 else 0.0
+
+
+    @property
+    def optimizer_fraction(self) -> float:
+        total_fetch = sum(self.fetch_latency_seconds)
+        total_compute = sum(self.compute_seconds)
+        denom = total_fetch + total_compute
+        return sum(self.optimizer_step_seconds) / denom if denom > 0 else 0.0
+
     def summary(self) -> dict[str, float]:
         return {
             "epoch": self.epoch,
@@ -75,6 +98,17 @@ class EpochStats:
             "fetch_p95": _percentile(self.fetch_latency_seconds, 95),
             "fetch_p99": _percentile(self.fetch_latency_seconds, 99),
             "compute_p50": _percentile(self.compute_seconds, 50),
+            "batch_wait_total_s": sum(self.fetch_latency_seconds),
+            "compute_total_s": sum(self.compute_seconds),
+            "zero_grad_total_s": sum(self.zero_grad_seconds),
+            "forward_backward_total_s": sum(self.forward_backward_seconds),
+            "optimizer_step_total_s": sum(self.optimizer_step_seconds),
+            "batch_wait_fraction": self.batch_wait_fraction,
+            "forward_backward_fraction": self.forward_backward_fraction,
+            "optimizer_fraction": self.optimizer_fraction,
+            "zero_grad_p50": _percentile(self.zero_grad_seconds, 50),
+            "forward_backward_p50": _percentile(self.forward_backward_seconds, 50),
+            "optimizer_step_p50": _percentile(self.optimizer_step_seconds, 50),
         }
 
 

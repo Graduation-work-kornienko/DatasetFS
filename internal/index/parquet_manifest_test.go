@@ -2,7 +2,6 @@ package index
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -50,19 +49,14 @@ func TestParquetManifest_RoundTrip(t *testing.T) {
 	require.Equal(t, Base, got.ShardsMeta[1].Type)
 }
 
-// TestManifest_StorePrefersParquetAndLoadReadsIt is the regression test for the
-// io.EOF bug: Store writes parquet, Load must read it back (not fail on EOF),
-// and the stale JSON manifest must be removed so the two can't drift.
-func TestManifest_StorePrefersParquetAndLoadReadsIt(t *testing.T) {
+// TestManifest_StoreAndLoadUseParquet is the regression test for the io.EOF bug:
+// Store writes parquet and Load must read it back without falling back to JSON.
+func TestManifest_StoreAndLoadUseParquet(t *testing.T) {
 	dir := t.TempDir()
-
-	// Seed a stale JSON manifest to prove Store removes it.
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "metadata.jsonl"), []byte(`{"version":"old"}`), 0644))
 
 	m := sampleManifest(dir)
 	require.NoError(t, m.Store())
 	require.FileExists(t, filepath.Join(dir, "metadata.parquet"))
-	require.NoFileExists(t, filepath.Join(dir, "metadata.jsonl"), "stale JSON manifest must be removed")
 
 	reloaded := NewManifest(dir)
 	require.NoError(t, reloaded.Load(nil), "Load must read the parquet manifest, not choke on io.EOF")
@@ -72,22 +66,4 @@ func TestManifest_StorePrefersParquetAndLoadReadsIt(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, idx.FileMap, "a.png")
 	require.Equal(t, int64(100), idx.FileMap["a.png"].Size)
-}
-
-func TestConvertJSONManifestToParquet(t *testing.T) {
-	dir := t.TempDir()
-
-	// Write a JSON manifest by hand (legacy on-disk format).
-	m := sampleManifest(dir)
-	jsonPath := filepath.Join(dir, "metadata.jsonl")
-	f, err := os.Create(jsonPath)
-	require.NoError(t, err)
-	require.NoError(t, json.NewEncoder(f).Encode(m))
-	require.NoError(t, f.Close())
-
-	require.NoError(t, ConvertJSONManifestToParquet(dir))
-
-	got, err := LoadParquetManifest(dir)
-	require.NoError(t, err)
-	require.Len(t, got.Files, 3)
 }

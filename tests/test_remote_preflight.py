@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from benchmarks.datasetfs_bench.runner.remote_preflight import datasetfs_urls, validate_config, webdataset_urls
+from benchmarks.datasetfs_bench.runner.remote_preflight import (
+    datasetfs_shard_urls_from_manifest,
+    datasetfs_urls,
+    validate_config,
+    webdataset_urls,
+)
+from scripts.datasets.datasetfs_writer import DatasetFSWriter
 
 
 def _cfg():
@@ -28,7 +34,7 @@ def _cfg():
 def test_remote_preflight_resolves_urls():
     cfg = _cfg()
 
-    assert datasetfs_urls(cfg) == ["http://example.test/dfs/metadata.jsonl"]
+    assert datasetfs_urls(cfg) == ["http://example.test/dfs/metadata.parquet"]
     assert webdataset_urls(cfg) == [
         "http://example.test/wds/shard-000000.tar",
         "http://example.test/wds/shard-000001.tar",
@@ -43,3 +49,17 @@ def test_remote_preflight_validates_required_settings():
     results = validate_config(bad)
 
     assert any(r.name == "dataset.webdataset_remote.wds_http_mode" and not r.ok for r in results)
+
+
+def test_remote_preflight_reads_datasetfs_shards_from_parquet_manifest(tmp_path):
+    root = tmp_path / "datasetfs"
+    with DatasetFSWriter(root, shard_target_bytes=700) as writer:
+        writer.add("a.bin", b"a" * 100, {})
+        writer.add("b.bin", b"b" * 100, {})
+        writer.add("c.bin", b"c" * 100, {})
+
+    assert datasetfs_shard_urls_from_manifest("http://example.test/dfs", root / "metadata.parquet") == [
+        "http://example.test/dfs/shard_0",
+        "http://example.test/dfs/shard_1",
+        "http://example.test/dfs/shard_2",
+    ]

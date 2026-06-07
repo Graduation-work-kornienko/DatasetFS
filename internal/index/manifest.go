@@ -2,7 +2,6 @@ package index
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,7 +40,6 @@ Manifest format
 
 const (
 	currentVersion                = "1.0"
-	manifestJSONFileName          = "metadata.jsonl"
 	manifestParquetFileName       = "metadata.parquet"
 	ShardSize               int64 = 100 * 1024 * 1024
 )
@@ -81,53 +79,21 @@ func (m *Manifest) Load(remoteStorage RemoteStorageInterface) error {
 		localRoot = m.Root
 	}
 
-	// First try to load Parquet manifest
 	parquetPath := filepath.Join(localRoot, manifestParquetFileName)
 	if _, err := os.Stat(parquetPath); err == nil {
-		// Parquet file exists, load it
 		manifest, err := LoadParquetManifest(localRoot)
 		if err != nil {
 			return fmt.Errorf("load parquet manifest: %w", err)
 		}
-		// Copy data to current manifest
 		*m = *manifest
 		return nil
+	} else {
+		return fmt.Errorf("metadata.parquet not found in %s: %w", localRoot, err)
 	}
-
-	// Fall back to JSON manifest
-	jsonPath := filepath.Join(localRoot, manifestJSONFileName)
-	file, err := os.Open(jsonPath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	if err := json.NewDecoder(file).Decode(m); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (m *Manifest) Store() error {
-	// First try to store as Parquet
-	if err := StoreParquetManifest(m); err == nil {
-		// Parquet is now the source of truth (Load reads it first). Remove any
-		// stale JSON manifest so the two can't drift out of sync.
-		os.Remove(filepath.Join(m.Root, manifestJSONFileName))
-		return nil
-	}
-
-	// Fall back to JSON format
-	jsonPath := filepath.Join(m.Root, manifestJSONFileName)
-	file, err := os.Create(jsonPath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(m)
+	return StoreParquetManifest(m)
 }
 
 func (m *Manifest) AppendShard(shard *Shard) error {

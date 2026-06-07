@@ -10,7 +10,6 @@ import argparse
 import csv
 import functools
 import io
-import json
 import os
 import signal
 import subprocess
@@ -23,12 +22,13 @@ import torch
 import torch.nn as nn
 import yaml
 from PIL import Image
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 import torchvision.transforms as T
 
 from benchmarks.datasetfs_bench.metrics import daemon as daemon_metrics
 from benchmarks.datasetfs_bench.metrics.system import SystemSampler
 from clients.python import DatasetFS
+from scripts.datasets.datasetfs_writer import read_parquet_manifest
 
 
 DAEMON_URL = "http://localhost:51409"
@@ -77,7 +77,7 @@ class Daemon:
         self.log_path = self.log_dir / f"daemon-real-universal-{int(time.time()*1000)}.log"
         self.log_file = open(self.log_path, "w")
         self.proc = subprocess.Popen(
-            [str(self.binary), "daemon", "--no-mount", "--root", str(self.root)],
+            [str(self.binary), "daemon", "--no-mount", "--no-wal", "--root", str(self.root)],
             stdout=self.log_file,
             stderr=subprocess.STDOUT,
             preexec_fn=os.setsid if hasattr(os, "setsid") else None,
@@ -167,6 +167,26 @@ def _decode_audio(raw) -> torch.Tensor:
     return torch.cat([energy, zc])
 
 
+def _decode_video(raw) -> torch.Tensor:
+    data = bytes(raw)
+    try:
+        import imageio.v3 as iio
+        frames = iio.imread(io.BytesIO(data), index=None)
+        arr = np.asarray(frames)
+        if arr.size:
+            arr = arr.reshape((-1,) + arr.shape[-3:])[:16].astype("float32") / 255.0
+            means = torch.as_tensor(arr.mean(axis=(1, 2)), dtype=torch.float32).flatten()
+            stds = torch.as_tensor(arr.std(axis=(1, 2)), dtype=torch.float32).flatten()
+            feat = torch.cat([means, stds])[:64]
+            return torch.nn.functional.pad(feat, (0, max(0, 64 - feat.numel())))
+    except Exception:
+        pass
+    hist = torch.zeros(64, dtype=torch.float32)
+    for b in data[:65536]:
+        hist[b % 64] += 1.0
+    return hist / max(1.0, hist.sum())
+
+
 _IMG_TF = T.Compose([T.Resize((160, 160)), T.ToTensor()])
 
 
@@ -186,6 +206,30 @@ def _label(item: dict) -> str:
     if "text" in item:
         return str(len(str(item["text"])) % 4)
     return str(hash(item.get("path", "")) % 4)
+
+
+class ParquetTextDataset(IterableDataset):
+    def __init__(self, path: Path):
+        self.path = path
+
+    def __iter__(self):
+        import pyarrow.parquet as pq
+        pf = pq.ParquetFile(self.path)
+        for batch in pf.iter_batches(columns=["text", "label", "path"], batch_size=1024):
+            data = batch.to_pydict()
+            for text, label, path in zip(data["text"], data["label"], data["path"]):
+                yield {"image": _decode_text(str(text).encode("utf-8")), "label": str(label), "path": str(path)}
+
+
+class VideoFolderDataset(IterableDataset):
+    def __init__(self, root: Path):
+        self.root = root
+
+    def __iter__(self):
+        exts = {".avi", ".mp4", ".mov", ".mkv", ".webm"}
+        for path in sorted(p for p in self.root.rglob("*") if p.is_file() and p.suffix.lower() in exts):
+            label = path.parent.name if path.parent != self.root else path.stem.split("_")[1]
+            yield {"image": _decode_video(path.read_bytes()), "label": label, "path": str(path)}
 
 
 def _vector_collate(items, label_to_idx: dict[str, int]):
@@ -223,7 +267,10 @@ def _collect_labels(root: Path, modality: str, limit: int = 512) -> list[str]:
     daemon = None
     labels = []
     try:
-        ds = DatasetFS(num_workers=0, decode_fn=_decode_text if modality == "text" else _decode_audio, transform=_identity, timeout_seconds=5)
+        decode = _decode_text if modality == "text" else _decode_audio
+        if modality == "video":
+            decode = _decode_video
+        ds = DatasetFS(num_workers=0, decode_fn=decode, transform=_identity, timeout_seconds=5)
         for i, item in enumerate(ds):
             labels.append(_label(item))
             if i + 1 >= limit:
@@ -232,6 +279,32 @@ def _collect_labels(root: Path, modality: str, limit: int = 512) -> list[str]:
         pass
     uniq = sorted(set(labels))
     return uniq or ["0", "1"]
+
+
+def _collect_labels_from_iterable(ds, limit: int = 512) -> list[str]:
+    labels = []
+    for i, item in enumerate(ds):
+        labels.append(_label(item))
+        if i + 1 >= limit:
+            break
+    uniq = sorted(set(labels))
+    return uniq or ["0", "1"]
+
+
+def _build_baseline_loader(format_cfg: dict, modality: str, batch_size: int):
+    fmt = format_cfg["format"]
+    path = Path(format_cfg["path"])
+    if fmt == "parquet" and modality == "text":
+        ds = ParquetTextDataset(path)
+        labels = _collect_labels_from_iterable(ParquetTextDataset(path))
+        loader = DataLoader(ds, batch_size=batch_size, num_workers=0, collate_fn=functools.partial(_vector_collate, label_to_idx={l: i for i, l in enumerate(labels)}))
+        return loader, VectorProbe(128, len(labels)), len(labels)
+    if fmt == "folder" and modality == "video":
+        ds = VideoFolderDataset(path)
+        labels = _collect_labels_from_iterable(VideoFolderDataset(path))
+        loader = DataLoader(ds, batch_size=batch_size, num_workers=0, collate_fn=functools.partial(_vector_collate, label_to_idx={l: i for i, l in enumerate(labels)}))
+        return loader, VectorProbe(64, len(labels)), len(labels)
+    raise ValueError(f"unsupported baseline format={fmt!r} modality={modality!r}")
 
 
 def _run_training(ds_cfg: dict, args, out_dir: Path) -> tuple[dict, list[dict]]:
@@ -262,6 +335,10 @@ def _run_training(ds_cfg: dict, args, out_dir: Path) -> tuple[dict, list[dict]]:
             ds = DatasetFS(num_workers=0, decode_fn=_decode_text, transform=_identity, timeout_seconds=10)
             loader = DataLoader(ds, batch_size=batch_size, num_workers=0, collate_fn=functools.partial(_vector_collate, label_to_idx=label_to_idx))
             model = VectorProbe(128, len(label_to_idx))
+        elif modality == "video":
+            ds = DatasetFS(num_workers=0, decode_fn=_decode_video, transform=_identity, timeout_seconds=15)
+            loader = DataLoader(ds, batch_size=batch_size, num_workers=0, collate_fn=functools.partial(_vector_collate, label_to_idx=label_to_idx))
+            model = VectorProbe(64, len(label_to_idx))
         else:
             raise ValueError(f"unsupported modality {modality!r}")
 
@@ -303,6 +380,7 @@ def _run_training(ds_cfg: dict, args, out_dir: Path) -> tuple[dict, list[dict]]:
             raise RuntimeError("no batches produced")
         row = {
             "name": ds_cfg["name"],
+            "format": "datasetfs",
             "task": ds_cfg["task"],
             "modality": modality,
             "status": "ok",
@@ -323,12 +401,59 @@ def _run_training(ds_cfg: dict, args, out_dir: Path) -> tuple[dict, list[dict]]:
         daemon.stop()
 
 
+def _run_baseline_training(ds_cfg: dict, format_cfg: dict, args) -> dict:
+    modality = format_cfg.get("modality", ds_cfg["modality"])
+    batch_size = int(format_cfg.get("batch_size", ds_cfg.get("batch_size", args.batch_size)))
+    max_batches = int(args.max_batches)
+    loader, model, classes_seen = _build_baseline_loader(format_cfg, modality, batch_size)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    loss_fn = nn.CrossEntropyLoss()
+    sampler = SystemSampler(interval_s=0.2, track_pids=[os.getpid()], track_labels={"python": os.getpid()})
+    losses = []
+    n_batches = 0
+    n_samples = 0
+    t0 = time.perf_counter()
+    sampler.start()
+    try:
+        for n_batches, (inputs, targets) in enumerate(loader, start=1):
+            if n_batches > max_batches:
+                break
+            opt.zero_grad()
+            out = model(**inputs) if isinstance(inputs, dict) else model(inputs)
+            loss = loss_fn(out, targets)
+            loss.backward()
+            opt.step()
+            losses.append(float(loss.item()))
+            n_samples += int(targets.shape[0])
+    finally:
+        sampler.stop()
+    wall = time.perf_counter() - t0
+    if not losses:
+        raise RuntimeError("no batches produced")
+    row = {
+        "name": ds_cfg["name"],
+        "format": format_cfg["format"],
+        "task": ds_cfg["task"],
+        "modality": modality,
+        "status": "ok",
+        "n_batches": min(n_batches, max_batches),
+        "n_samples": n_samples,
+        "wall_s": wall,
+        "samples_per_s": n_samples / wall if wall > 0 else 0,
+        "loss_first": losses[0],
+        "loss_last": losses[-1],
+        "classes_seen": classes_seen,
+    }
+    row.update({f"sys_{k}": v for k, v in sampler.summary().items()})
+    return row
+
+
 def _dataset_profile(root: Path) -> dict:
-    manifest_path = root / "metadata.jsonl"
+    manifest_path = root / "metadata.parquet"
     if not manifest_path.exists():
         return {}
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = read_parquet_manifest(root)
     except Exception:
         return {}
     files = manifest.get("files", {})
@@ -381,25 +506,48 @@ def main() -> None:
     missing = []
     for ds_cfg in cfg["datasets"]:
         root = Path(ds_cfg["datasetfs"])
-        if not root.exists():
+        if root.exists():
+            print(f"[run] {ds_cfg['name']} ({ds_cfg['modality']})", flush=True)
+            try:
+                row, daemon_samples = _run_training(ds_cfg, args, args.output)
+                rows.append(row)
+                daemon_timeseries_rows.extend(daemon_samples)
+                daemon_metrics.write_rows_union(args.output / "daemon_timeseries.csv", daemon_timeseries_rows)
+            except Exception as e:
+                rows.append({"name": ds_cfg["name"], "format": "datasetfs", "modality": ds_cfg["modality"], "status": "error", "error": repr(e)})
+                if args.require_all:
+                    raise
+        else:
             missing.append({
                 "name": ds_cfg["name"],
+                "format": "datasetfs",
                 "modality": ds_cfg["modality"],
                 "datasetfs": str(root),
                 "prepare": ds_cfg.get("prepare", ""),
             })
             print(f"[missing] {ds_cfg['name']}: {root}", flush=True)
-            continue
-        print(f"[run] {ds_cfg['name']} ({ds_cfg['modality']})", flush=True)
-        try:
-            row, daemon_samples = _run_training(ds_cfg, args, args.output)
-            rows.append(row)
-            daemon_timeseries_rows.extend(daemon_samples)
-            daemon_metrics.write_rows_union(args.output / "daemon_timeseries.csv", daemon_timeseries_rows)
-        except Exception as e:
-            rows.append({"name": ds_cfg["name"], "modality": ds_cfg["modality"], "status": "error", "error": repr(e)})
-            if args.require_all:
-                raise
+
+        for format_cfg in ds_cfg.get("formats", []):
+            fmt_path = Path(format_cfg["path"])
+            fmt_name = format_cfg["format"]
+            modality = format_cfg.get("modality", ds_cfg["modality"])
+            if not fmt_path.exists():
+                missing.append({
+                    "name": ds_cfg["name"],
+                    "format": fmt_name,
+                    "modality": modality,
+                    "datasetfs": str(fmt_path),
+                    "prepare": ds_cfg.get("prepare", ""),
+                })
+                print(f"[missing] {ds_cfg['name']}/{fmt_name}: {fmt_path}", flush=True)
+                continue
+            print(f"[run] {ds_cfg['name']}/{fmt_name} ({modality})", flush=True)
+            try:
+                rows.append(_run_baseline_training(ds_cfg, format_cfg, args))
+            except Exception as e:
+                rows.append({"name": ds_cfg["name"], "format": fmt_name, "modality": modality, "status": "error", "error": repr(e)})
+                if args.require_all:
+                    raise
     _write_csv(args.output / "summary.csv", rows)
     _write_csv(args.output / "missing.csv", missing)
     if missing and args.require_all:

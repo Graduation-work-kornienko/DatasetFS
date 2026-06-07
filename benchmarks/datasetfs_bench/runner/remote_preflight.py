@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
 import yaml
+
+from scripts.datasets.datasetfs_writer import read_parquet_manifest
 
 
 @dataclass
@@ -26,7 +29,21 @@ def datasetfs_urls(cfg: dict) -> list[str]:
     root = remote.get("root_url")
     if not root:
         return []
+    return [_join_url(str(root), "metadata.parquet")]
+
+
+def datasetfs_legacy_urls(cfg: dict) -> list[str]:
+    remote = cfg.get("datasetfs_remote") or {}
+    root = remote.get("root_url")
+    if not root:
+        return []
     return [_join_url(str(root), "metadata.jsonl")]
+
+
+def datasetfs_shard_urls_from_manifest(root_url: str, manifest_path: Path, max_shards: int = 3) -> list[str]:
+    manifest = read_parquet_manifest(manifest_path.parent)
+    shard_ids = sorted(int(k) for k in manifest.get("shards_meta", {}) if int(k) >= 0)
+    return [_join_url(root_url, f"shard_{i}") for i in shard_ids[:max_shards]]
 
 
 def webdataset_urls(cfg: dict) -> list[str]:
@@ -55,6 +72,35 @@ def _probe_url(url: str, timeout: float) -> CheckResult:
             r.close()
     except Exception as e:
         return CheckResult(url, False, repr(e))
+
+
+def _download_manifest(url: str, timeout: float) -> tuple[CheckResult, Path | None, tempfile.TemporaryDirectory | None]:
+    td = tempfile.TemporaryDirectory(prefix="datasetfs-remote-manifest-")
+    path = Path(td.name) / "metadata.parquet"
+    try:
+        r = requests.get(url, timeout=timeout)
+        if r.status_code != 200:
+            td.cleanup()
+            return CheckResult(url, False, f"HTTP {r.status_code}"), None, None
+        path.write_bytes(r.content)
+        read_parquet_manifest(path.parent)
+        return CheckResult(url, True, f"HTTP 200 parquet_bytes={len(r.content)}"), path, td
+    except Exception as e:
+        td.cleanup()
+        return CheckResult(url, False, repr(e)), None, None
+
+
+def _probe_absent(url: str, timeout: float) -> CheckResult:
+    try:
+        r = requests.get(url, headers={"Range": "bytes=0-0"}, stream=True, timeout=timeout)
+        try:
+            if r.status_code == 404:
+                return CheckResult(url, True, "absent")
+            return CheckResult(url, False, f"legacy manifest present: HTTP {r.status_code}")
+        finally:
+            r.close()
+    except Exception:
+        return CheckResult(url, True, "absent/unreachable")
 
 
 def validate_config(cfg: dict) -> list[CheckResult]:
@@ -88,8 +134,20 @@ def run_preflight(config_path: Path, timeout: float = 5.0, check_urls: bool = Tr
     cfg = yaml.safe_load(config_path.read_text())
     results = validate_config(cfg)
     if check_urls:
+        remote = cfg.get("datasetfs_remote") or {}
+        root_url = str(remote.get("root_url") or "")
         for url in datasetfs_urls(cfg):
-            results.append(_probe_url(url, timeout))
+            result, manifest_path, td = _download_manifest(url, timeout)
+            results.append(result)
+            try:
+                if manifest_path is not None:
+                    for shard_url in datasetfs_shard_urls_from_manifest(root_url, manifest_path):
+                        results.append(_probe_url(shard_url, timeout))
+            finally:
+                if td is not None:
+                    td.cleanup()
+        for url in datasetfs_legacy_urls(cfg):
+            results.append(_probe_absent(url, timeout))
         for url in webdataset_urls(cfg):
             results.append(_probe_url(url, timeout))
     return results

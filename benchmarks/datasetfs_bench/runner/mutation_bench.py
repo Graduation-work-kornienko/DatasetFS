@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import csv
 import functools
-import json
+import io
 import os
 import random
 import shutil
@@ -34,6 +34,7 @@ from benchmarks.datasetfs_bench.metrics.system import SystemSampler
 from benchmarks.datasetfs_bench.models.registry import build_model
 from benchmarks.datasetfs_bench.train.loop import train_one_epoch
 from clients.python import DatasetFS
+from scripts.datasets.datasetfs_writer import read_parquet_manifest, write_parquet_manifest
 
 
 DAEMON_URL = "http://localhost:51409"
@@ -102,11 +103,20 @@ def _wait_for_healthz(timeout_s: float = 30.0) -> None:
 
 
 class MountedDaemon:
-    def __init__(self, binary: Path, root: Path, mount: Path, log_dir: Path):
+    def __init__(self, binary: Path, root: Path, mount: Path, log_dir: Path, *,
+                 no_wal: bool = False, wal_format: str = "binary",
+                 auto_vacuum: bool = False, vacuum_interval: str | None = None,
+                 vacuum_threshold: float | None = None, vacuum_throttle: int | None = None):
         self.binary = binary
         self.root = root
         self.mount = mount
         self.log_dir = log_dir
+        self.no_wal = no_wal
+        self.wal_format = wal_format
+        self.auto_vacuum = auto_vacuum
+        self.vacuum_interval = vacuum_interval
+        self.vacuum_threshold = vacuum_threshold
+        self.vacuum_throttle = vacuum_throttle
         self.proc: subprocess.Popen | None = None
         self.log_file = None
 
@@ -117,8 +127,21 @@ class MountedDaemon:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self.log_dir / f"daemon-mutation-{int(time.time() * 1000)}.log"
         self.log_file = open(self.log_path, "w")
+        argv = [str(self.binary), "daemon", "--mount", str(self.mount), "--root", str(self.root)]
+        if self.no_wal:
+            argv.append("--no-wal")
+        else:
+            argv += ["--wal-format", self.wal_format]
+        if self.auto_vacuum:
+            argv.append("--auto-vacuum")
+            if self.vacuum_interval:
+                argv += ["--vacuum-interval", self.vacuum_interval]
+            if self.vacuum_threshold is not None:
+                argv += ["--vacuum-threshold", str(self.vacuum_threshold)]
+            if self.vacuum_throttle is not None:
+                argv += ["--vacuum-throttle", str(self.vacuum_throttle)]
         self.proc = subprocess.Popen(
-            [str(self.binary), "daemon", "--mount", str(self.mount), "--root", str(self.root)],
+            argv,
             stdout=self.log_file,
             stderr=subprocess.STDOUT,
             preexec_fn=os.setsid if hasattr(os, "setsid") else None,
@@ -177,6 +200,12 @@ class MutatorStats:
     failed: int = 0
     latency_sum_s: float = 0.0
     latency_max_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class PlannedMutation:
+    name: str
+    data: bytes
 
 
 class Mutator(threading.Thread):
@@ -284,10 +313,7 @@ class FixedDeleteMutator(threading.Thread):
 
 def _create_empty_datasetfs_root(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    (root / "metadata.jsonl").write_text(
-        json.dumps({"version": "1.0", "shards_meta": {}, "files": {}}),
-        encoding="utf-8",
-    )
+    write_parquet_manifest(root, {"version": "1.0", "shards_meta": {}, "files": {}})
 
 
 def _label_to_idx(imagefolder_root: Path) -> dict[str, int]:
@@ -385,8 +411,73 @@ def prepare_flat_image_datasetfs(
         shard_bytes += size
     flush(shard_entries)
 
-    (out_root / "metadata.jsonl").write_text(json.dumps(manifest), encoding="utf-8")
+    write_parquet_manifest(out_root, manifest)
     return live_names
+
+
+def prepare_flat_imagefolder(
+    imagefolder_root: Path,
+    out_root: Path,
+    *,
+    max_files: int | None,
+    seed: int,
+) -> list[str]:
+    if out_root.exists():
+        shutil.rmtree(out_root)
+    out_root.mkdir(parents=True, exist_ok=True)
+    files = _image_files(imagefolder_root, max_files=max_files, seed=seed)
+    names: list[str] = []
+    for src, _label, flat_name in files:
+        shutil.copyfile(src, out_root / flat_name)
+        names.append(flat_name)
+    return names
+
+
+def prepare_flat_webdataset(
+    imagefolder_root: Path,
+    out_root: Path,
+    *,
+    max_files: int | None,
+    shard_target_bytes: int,
+    seed: int,
+) -> list[str]:
+    if out_root.exists():
+        shutil.rmtree(out_root)
+    out_root.mkdir(parents=True, exist_ok=True)
+    files = _image_files(imagefolder_root, max_files=max_files, seed=seed)
+    names: list[str] = []
+    index_rows: list[dict] = []
+    shard_id = 0
+    shard_entries: list[tuple[Path, str]] = []
+    shard_bytes = 0
+
+    def flush(entries: list[tuple[Path, str]]) -> None:
+        nonlocal shard_id
+        if not entries:
+            return
+        shard_name = f"shard_{shard_id:06d}.tar"
+        with tarfile.open(out_root / shard_name, "w") as tf:
+            for src, flat_name in entries:
+                info = tarfile.TarInfo(name=flat_name)
+                info.size = src.stat().st_size
+                info.mode = 0o600
+                with open(src, "rb") as f:
+                    tf.addfile(info, f)
+                index_rows.append({"name": flat_name, "shard": shard_name})
+                names.append(flat_name)
+        shard_id += 1
+
+    for src, _label, flat_name in files:
+        size = src.stat().st_size
+        if shard_entries and shard_bytes + size > shard_target_bytes:
+            flush(shard_entries)
+            shard_entries = []
+            shard_bytes = 0
+        shard_entries.append((src, flat_name))
+        shard_bytes += size
+    flush(shard_entries)
+    _write_rows_union(out_root / "webdataset_index.csv", index_rows)
+    return names
 
 
 def _drain_epoch(timeout_s: float, start_after_first: threading.Thread | None = None,
@@ -418,6 +509,11 @@ def _write_rows(path: Path, rows: Iterable[dict]) -> None:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _read_rows(path: Path) -> list[dict[str, str]]:
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
 
 
 def _write_rows_union(path: Path, rows: Iterable[dict]) -> None:
@@ -523,27 +619,29 @@ def _run_case(args, mode: str, rate: float, repeat: int, out_dir: Path) -> dict:
             daemon.stop()
 
 
-def _run_image_endurance(args) -> None:
-    if args.imagefolder_root is None:
-        raise SystemExit("--imagefolder-root is required for --scenario image_endurance")
-    args.output.mkdir(parents=True, exist_ok=True)
-    flat_root = args.dataset_root or (args.output / "flat_datasetfs")
-    if args.prepare_flat or not flat_root.exists():
-        print(f"[mutation-endurance] preparing flat DatasetFS at {flat_root}", flush=True)
-        live_names = prepare_flat_image_datasetfs(
-            args.imagefolder_root,
-            flat_root,
-            max_files=args.max_flat_files,
-            shard_target_bytes=args.shard_target_mb * 1024 * 1024,
-            seed=args.seed,
-        )
-    else:
-        # Reusing a prepared root assumes logical paths are already flat.
-        meta = json.loads((flat_root / "metadata.jsonl").read_text(encoding="utf-8"))
-        live_names = [name for name, m in meta["files"].items() if not m.get("deleted")]
+def _load_live_names(flat_root: Path) -> list[str]:
+    meta = read_parquet_manifest(flat_root)
+    return [name for name, m in meta["files"].items() if not m.get("deleted")]
 
-    mount = args.output / "mnt"
-    daemon = MountedDaemon(args.binary, flat_root, mount, args.output / "logs")
+
+def _run_image_endurance_case(args, *, flat_root: Path, output: Path, scenario_name: str,
+                              no_wal: bool = False, wal_format: str = "binary",
+                              auto_vacuum: bool = False) -> tuple[list[dict], list[dict]]:
+    output.mkdir(parents=True, exist_ok=True)
+    live_names = _load_live_names(flat_root)
+    mount = output / "mnt"
+    daemon = MountedDaemon(
+        args.binary,
+        flat_root,
+        mount,
+        output / "logs",
+        no_wal=no_wal,
+        wal_format=wal_format,
+        auto_vacuum=auto_vacuum,
+        vacuum_interval=args.vacuum_interval,
+        vacuum_threshold=args.vacuum_threshold,
+        vacuum_throttle=args.vacuum_throttle,
+    )
     label_to_idx = _label_to_idx(args.imagefolder_root)
     rows: list[dict] = []
     events: list[dict] = []
@@ -555,6 +653,7 @@ def _run_image_endurance(args) -> None:
         interval_s=args.sample_interval,
         track_pids=[os.getpid()] + ([daemon.pid] if daemon.pid else []),
         track_labels={"python": os.getpid(), **({"daemon": daemon.pid} if daemon.pid else {})},
+        disk_path=flat_root,
     )
     bench_t0 = time.perf_counter()
     sampler.start()
@@ -615,6 +714,10 @@ def _run_image_endurance(args) -> None:
                 mstats = mutator.stats
                 row = {
                     "scenario": "image_endurance",
+                    "vacuum_scenario": scenario_name,
+                    "wal_enabled": not no_wal,
+                    "wal_format": "none" if no_wal else wal_format,
+                    "auto_vacuum": auto_vacuum,
                     "train_run": run_idx,
                     "train_start_s": start_s,
                     "train_end_s": end_s,
@@ -631,21 +734,255 @@ def _run_image_endurance(args) -> None:
                 row.update({f"epoch_{k}": v for k, v in daemon_metrics.cell_summary(daemon_before, daemon_after).items()})
                 rows.append(row)
                 events.append({"train_run": run_idx, "start_s": start_s, "end_s": end_s})
-                _write_rows_union(args.output / "summary.csv", rows)
-                _write_rows_union(args.output / "train_events.csv", events)
+                _write_rows_union(output / "summary.csv", rows)
+                _write_rows_union(output / "train_events.csv", events)
         finally:
             loader.teardown()
     finally:
         sampler.stop()
         daemon.stop()
 
-    _write_rows_union(args.output / "system_timeseries.csv", sampler.samples)
-    print(f"[mutation-endurance] wrote {args.output / 'summary.csv'}", flush=True)
+    for sample in sampler.samples:
+        sample["vacuum_scenario"] = scenario_name
+        sample["wal_format"] = "none" if no_wal else wal_format
+        sample["auto_vacuum"] = auto_vacuum
+    _write_rows_union(output / "system_timeseries.csv", sampler.samples)
+    print(f"[mutation-endurance] wrote {output / 'summary.csv'}", flush=True)
+    return rows, sampler.samples
+
+
+def _prepare_or_load_flat_root(args, flat_root: Path) -> None:
+    if args.prepare_flat or not flat_root.exists():
+        print(f"[mutation-endurance] preparing flat DatasetFS at {flat_root}", flush=True)
+        prepare_flat_image_datasetfs(
+            args.imagefolder_root,
+            flat_root,
+            max_files=args.max_flat_files,
+            shard_target_bytes=args.shard_target_mb * 1024 * 1024,
+            seed=args.seed,
+        )
+
+
+def _planned_replacements(names: list[str], count: int, payload_size: int, seed: int) -> list[PlannedMutation]:
+    if count <= 0:
+        return []
+    if count > len(names):
+        raise ValueError(f"changed_files={count} exceeds available files={len(names)}")
+    rng = random.Random(seed)
+    chosen = rng.sample(names, count)
+    return [PlannedMutation(name=name, data=_payload(seed + i, payload_size)) for i, name in enumerate(chosen)]
+
+
+def _replace_regular_files(root: Path, mutations: list[PlannedMutation]) -> None:
+    for mutation in mutations:
+        path = root / mutation.name
+        path.unlink(missing_ok=True)
+        with open(path, "wb") as f:
+            f.write(mutation.data)
+
+
+def _read_webdataset_index(root: Path) -> dict[str, str]:
+    rows = _read_rows(root / "webdataset_index.csv")
+    return {row["name"]: row["shard"] for row in rows}
+
+
+def _replace_webdataset_files(root: Path, mutations: list[PlannedMutation]) -> None:
+    index = _read_webdataset_index(root)
+    replacements = {m.name: m.data for m in mutations}
+    by_shard: dict[str, set[str]] = {}
+    for name in replacements:
+        shard = index.get(name)
+        if shard is None:
+            raise FileNotFoundError(f"{name} not found in webdataset index")
+        by_shard.setdefault(shard, set()).add(name)
+
+    for shard_name, names in by_shard.items():
+        shard_path = root / shard_name
+        tmp_path = shard_path.with_suffix(shard_path.suffix + ".tmp")
+        seen: set[str] = set()
+        with tarfile.open(shard_path, "r") as src_tf, tarfile.open(tmp_path, "w") as dst_tf:
+            for member in src_tf.getmembers():
+                data = replacements[member.name] if member.name in names else src_tf.extractfile(member).read()
+                if member.name in names:
+                    seen.add(member.name)
+                info = tarfile.TarInfo(name=member.name)
+                info.size = len(data)
+                info.mode = member.mode
+                dst_tf.addfile(info, io.BytesIO(data))
+        missing = names - seen
+        if missing:
+            tmp_path.unlink(missing_ok=True)
+            raise FileNotFoundError(f"missing members in {shard_name}: {sorted(missing)[:3]}")
+        os.replace(tmp_path, shard_path)
+
+
+def _format_mutation_row(fmt: str, changed_files: int, repeat: int, elapsed_s: float, failed: int, bytes_written: int) -> dict:
+    succeeded = changed_files - failed
+    return {
+        "scenario": "format_mutation",
+        "format": fmt,
+        "operation": "replace",
+        "changed_files": changed_files,
+        "repeat": repeat,
+        "elapsed_s": elapsed_s,
+        "mean_operation_ms": (elapsed_s / changed_files * 1000.0) if changed_files else 0.0,
+        "operations_succeeded": succeeded,
+        "operations_failed": failed,
+        "bytes_written": bytes_written,
+    }
+
+
+def _run_datasetfs_format_mutation(args, base_root: Path, names: list[str], mutations: list[PlannedMutation], repeat: int, changed_files: int, out_dir: Path) -> dict:
+    root = out_dir / f"datasetfs_{changed_files}_{repeat}"
+    if root.exists():
+        shutil.rmtree(root)
+    shutil.copytree(base_root, root)
+    (root / "wal.log").unlink(missing_ok=True)
+    mount = out_dir / f"mnt_{changed_files}_{repeat}"
+    daemon = MountedDaemon(args.binary, root, mount, out_dir / "logs", wal_format="binary")
+    daemon.start()
+    try:
+        start = time.perf_counter()
+        failed = 0
+        try:
+            _replace_regular_files(mount, mutations)
+        except Exception:
+            failed = changed_files
+        elapsed = time.perf_counter() - start
+        row = _format_mutation_row("datasetfs", changed_files, repeat, elapsed, failed, sum(len(m.data) for m in mutations))
+        row["available_files"] = len(names)
+        return row
+    finally:
+        daemon.stop()
+
+
+def _run_directory_format_mutation(fmt: str, base_root: Path, names: list[str], mutations: list[PlannedMutation], repeat: int, changed_files: int, out_dir: Path) -> dict:
+    root = out_dir / f"{fmt}_{changed_files}_{repeat}"
+    if root.exists():
+        shutil.rmtree(root)
+    shutil.copytree(base_root, root)
+    start = time.perf_counter()
+    failed = 0
+    try:
+        if fmt == "imagefolder":
+            _replace_regular_files(root, mutations)
+        elif fmt == "webdataset":
+            _replace_webdataset_files(root, mutations)
+        else:
+            raise ValueError(f"unknown format {fmt!r}")
+    except Exception:
+        failed = changed_files
+    elapsed = time.perf_counter() - start
+    row = _format_mutation_row(fmt, changed_files, repeat, elapsed, failed, sum(len(m.data) for m in mutations))
+    row["available_files"] = len(names)
+    return row
+
+
+def _run_format_mutation(args) -> None:
+    if args.imagefolder_root is None:
+        raise SystemExit("--imagefolder-root is required for --scenario format_mutation")
+    args.output.mkdir(parents=True, exist_ok=True)
+    base_dir = args.output / "prepared"
+    base_datasetfs = base_dir / "datasetfs"
+    base_imagefolder = base_dir / "imagefolder"
+    base_webdataset = base_dir / "webdataset"
+    print(f"[format-mutation] preparing scratch artifacts under {base_dir}", flush=True)
+    names = prepare_flat_image_datasetfs(
+        args.imagefolder_root,
+        base_datasetfs,
+        max_files=args.max_flat_files,
+        shard_target_bytes=args.shard_target_mb * 1024 * 1024,
+        seed=args.seed,
+    )
+    image_names = prepare_flat_imagefolder(args.imagefolder_root, base_imagefolder, max_files=args.max_flat_files, seed=args.seed)
+    web_names = prepare_flat_webdataset(
+        args.imagefolder_root,
+        base_webdataset,
+        max_files=args.max_flat_files,
+        shard_target_bytes=args.shard_target_mb * 1024 * 1024,
+        seed=args.seed,
+    )
+    if names != image_names or names != web_names:
+        raise RuntimeError("prepared mutation format artifacts do not contain the same logical names")
+
+    rows: list[dict] = []
+    work_dir = args.output / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    for changed_files in args.changed_files:
+        for repeat in range(args.repeats):
+            mutations = _planned_replacements(names, changed_files, args.payload_size, args.seed + repeat * 100_000 + changed_files)
+            for fmt in args.formats:
+                print(f"[format-mutation] format={fmt} changed_files={changed_files} repeat={repeat}", flush=True)
+                if fmt == "datasetfs":
+                    row = _run_datasetfs_format_mutation(args, base_datasetfs, names, mutations, repeat, changed_files, work_dir)
+                elif fmt in {"imagefolder", "webdataset"}:
+                    base = base_imagefolder if fmt == "imagefolder" else base_webdataset
+                    row = _run_directory_format_mutation(fmt, base, names, mutations, repeat, changed_files, work_dir)
+                else:
+                    raise SystemExit(f"unsupported --formats value: {fmt}")
+                rows.append(row)
+                _write_rows_union(args.output / "summary.csv", rows)
+    print(f"[format-mutation] wrote {args.output / 'summary.csv'}", flush=True)
+
+
+def _run_image_endurance(args) -> None:
+    if args.imagefolder_root is None:
+        raise SystemExit("--imagefolder-root is required for --scenario image_endurance")
+    args.output.mkdir(parents=True, exist_ok=True)
+    flat_root = args.dataset_root or (args.output / "flat_datasetfs")
+    _prepare_or_load_flat_root(args, flat_root)
+    _run_image_endurance_case(
+        args,
+        flat_root=flat_root,
+        output=args.output,
+        scenario_name="binary_wal_no_vacuum",
+        no_wal=False,
+        wal_format="binary",
+        auto_vacuum=False,
+    )
+
+
+def _run_vacuum_matrix(args) -> None:
+    if args.imagefolder_root is None:
+        raise SystemExit("--imagefolder-root is required for --scenario vacuum_matrix")
+    args.output.mkdir(parents=True, exist_ok=True)
+    base_root = args.dataset_root or (args.output / "base_flat_datasetfs")
+    _prepare_or_load_flat_root(args, base_root)
+
+    scenarios = [
+        ("binary_wal_no_vacuum", False, "binary", False),
+        ("json_wal_with_vacuum", False, "json", True),
+        ("no_wal_no_vacuum", True, "none", False),
+        ("binary_wal_with_vacuum", False, "binary", True),
+    ]
+    all_rows: list[dict] = []
+    all_samples: list[dict] = []
+    for name, no_wal, wal_format, auto_vacuum in scenarios:
+        scenario_out = args.output / name
+        scenario_root = scenario_out / "flat_datasetfs"
+        if scenario_root.exists():
+            shutil.rmtree(scenario_root)
+        shutil.copytree(base_root, scenario_root)
+        (scenario_root / "wal.log").unlink(missing_ok=True)
+        rows, samples = _run_image_endurance_case(
+            args,
+            flat_root=scenario_root,
+            output=scenario_out,
+            scenario_name=name,
+            no_wal=no_wal,
+            wal_format="binary" if wal_format == "none" else wal_format,
+            auto_vacuum=auto_vacuum,
+        )
+        all_rows.extend(rows)
+        all_samples.extend(samples)
+        _write_rows_union(args.output / "summary.csv", all_rows)
+        _write_rows_union(args.output / "system_timeseries.csv", all_samples)
+    print(f"[vacuum-matrix] wrote {args.output / 'summary.csv'}", flush=True)
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--scenario", choices=["flat_smoke", "image_endurance"], default="flat_smoke")
+    p.add_argument("--scenario", choices=["flat_smoke", "image_endurance", "vacuum_matrix", "format_mutation"], default="flat_smoke")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--binary", type=Path, default=Path("bin/datasetfs"))
     p.add_argument("--files", type=int, default=256)
@@ -677,14 +1014,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", default="simplecnn")
     p.add_argument("--max-batches-per-train", type=int)
     p.add_argument("--warmup-batches", type=int, default=1)
+    p.add_argument("--vacuum-interval", default="1s")
+    p.add_argument("--vacuum-threshold", type=float, default=0.05)
+    p.add_argument("--vacuum-throttle", type=int, default=0)
+    p.add_argument("--changed-files", nargs="+", type=int, default=[1, 5, 10, 25, 50, 100],
+                   help="Mutation counts for --scenario format_mutation; plotted on the X axis.")
+    p.add_argument("--formats", nargs="+", default=["datasetfs", "imagefolder", "webdataset"],
+                   help="Formats for --scenario format_mutation: datasetfs imagefolder webdataset.")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if sys.platform != "darwin" or not Path("/Library/Filesystems/macfuse.fs").exists():
+    needs_fuse = args.scenario != "format_mutation" or "datasetfs" in args.formats
+    if needs_fuse and (sys.platform != "darwin" or not Path("/Library/Filesystems/macfuse.fs").exists()):
         raise SystemExit("mutation benchmark requires macFUSE on macOS")
-    if not args.binary.exists():
+    if needs_fuse and not args.binary.exists():
         raise SystemExit(f"datasetfs binary not found: {args.binary}")
     if args.output.exists() and not args.keep_output:
         shutil.rmtree(args.output)
@@ -693,6 +1038,12 @@ def main() -> None:
 
     if args.scenario == "image_endurance":
         _run_image_endurance(args)
+        return
+    if args.scenario == "vacuum_matrix":
+        _run_vacuum_matrix(args)
+        return
+    if args.scenario == "format_mutation":
+        _run_format_mutation(args)
         return
 
     rows = []

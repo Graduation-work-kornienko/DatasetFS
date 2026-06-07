@@ -60,7 +60,7 @@ func newVacuumCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&preserveWAL, "preserve-wal", false, "Preserve WAL after vacuum instead of truncating it")
 	cmd.Flags().BoolVar(&background, "background", false, "Yield periodically; pair with --throttle to limit read bandwidth")
 	cmd.Flags().Int64Var(&throttle, "throttle", 0, "Throttle read bandwidth in bytes/sec (0 = unlimited)")
-	cmd.Flags().StringVar(&walFormat, "wal-format", "json", "WAL format: json or binary")
+	cmd.Flags().StringVar(&walFormat, "wal-format", "binary", "WAL format: json or binary")
 
 	return cmd
 }

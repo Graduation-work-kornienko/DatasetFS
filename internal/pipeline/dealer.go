@@ -101,8 +101,12 @@ func DealerWorker(
 	var frameBuf bytes.Buffer
 	emit := func(items []*Metadata) error {
 		start := time.Now()
+		encodeStart := time.Now()
 		encodeFrame(&frameBuf, items, gen)
+		metrics.FrameEncodeLatency.Record(time.Since(encodeStart))
+		writeStart := time.Now()
 		_, err := pipeFile.Write(frameBuf.Bytes())
+		metrics.PipeWriteLatency.Record(time.Since(writeStart))
 		metrics.DealerEmitLatency.Record(time.Since(start))
 		return err
 	}

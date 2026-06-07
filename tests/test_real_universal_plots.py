@@ -13,6 +13,7 @@ def test_real_universal_plot(tmp_path):
     rows = [
         {
             "name": "wiki",
+            "format": "datasetfs",
             "modality": "text",
             "status": "ok",
             "samples_per_s": "320.0",
@@ -22,6 +23,7 @@ def test_real_universal_plot(tmp_path):
         },
         {
             "name": "audio",
+            "format": "parquet",
             "modality": "audio_text",
             "status": "ok",
             "samples_per_s": "180.0",

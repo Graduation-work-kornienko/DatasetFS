@@ -76,10 +76,10 @@ class DaemonManager:
         else:
             stdout = subprocess.DEVNULL
         print(
-            f"[daemon] start {self.binary} daemon --no-mount --root {self.root_path}",
+            f"[daemon] start {self.binary} daemon --no-mount --no-wal --root {self.root_path}",
             flush=True,
         )
-        argv = [str(self.binary), "daemon", "--no-mount", "--root", str(self.root_path)]
+        argv = [str(self.binary), "daemon", "--no-mount", "--no-wal", "--root", str(self.root_path)]
         if self.cache_dir is not None:
             argv += ["--cache-dir", str(self.cache_dir)]
         if self.prefetch_concurrency is not None:

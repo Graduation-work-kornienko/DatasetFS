@@ -2,6 +2,7 @@
 
 Reads `<run>/summary.csv` and writes:
   - <run>/throughput_bar.png      (mean ± stddev across seeds, steady-state only)
+  - <run>/training_stage_breakdown.png
   - <run>/latency_table.md        (latency percentiles per loader)
 """
 from __future__ import annotations
@@ -64,6 +65,33 @@ def _aggregate_latency(rows: list[dict]) -> dict[str, dict[str, float]]:
     for loader, by_metric in per_loader.items():
         out[loader] = {k: (mean(vs) if vs else float("nan")) for k, vs in by_metric.items()}
     return out
+
+
+def _f(row: dict, key: str, default: float = 0.0) -> float:
+    try:
+        return float(row.get(key, "") or default)
+    except ValueError:
+        return default
+
+
+def _aggregate_stage_fractions(rows: list[dict]) -> dict[str, dict[str, float]]:
+    per_loader: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        if r.get("warmup", "").lower() == "true":
+            continue
+        loader = r["loader"]
+        wait = _f(r, "batch_wait_fraction", _f(r, "stall_fraction"))
+        fwd_bwd = _f(r, "forward_backward_fraction")
+        opt = _f(r, "optimizer_fraction")
+        other = max(0.0, 1.0 - wait - fwd_bwd - opt)
+        per_loader[loader]["wait"].append(wait)
+        per_loader[loader]["forward_backward"].append(fwd_bwd)
+        per_loader[loader]["optimizer"].append(opt)
+        per_loader[loader]["other_compute"].append(other)
+    return {
+        loader: {stage: mean(vals) if vals else 0.0 for stage, vals in stages.items()}
+        for loader, stages in per_loader.items()
+    }
 
 
 def loader_display_names(loaders_cfg) -> list[str]:
@@ -148,11 +176,43 @@ def write_latency_table(run_dir: Path) -> Path:
     return out_path
 
 
+def plot_training_stage_breakdown(run_dir: Path) -> Path:
+    rows = _read_rows(run_dir / "summary.csv")
+    agg = _aggregate_stage_fractions(rows)
+    if not agg:
+        raise ValueError("no non-warmup rows in summary.csv")
+    order = sorted(agg)
+    stages = [
+        ("wait", "Data wait", "#3a78c0"),
+        ("forward_backward", "Forward+backward", "#c0563a"),
+        ("optimizer", "Optimizer", "#6a4c93"),
+        ("other_compute", "Other compute", "#999999"),
+    ]
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bottoms = [0.0 for _ in order]
+    xs = list(range(len(order)))
+    for key, label, color in stages:
+        vals = [agg[loader].get(key, 0.0) * 100.0 for loader in order]
+        ax.bar(xs, vals, bottom=bottoms, label=label, color=color, edgecolor="black", linewidth=0.4)
+        bottoms = [b + v for b, v in zip(bottoms, vals)]
+    ax.set_xticks(xs, order)
+    ax.set_ylabel("share of batch cycle, %")
+    ax.set_title("Training Stage Breakdown")
+    ax.grid(axis="y", linestyle=":", alpha=0.4)
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    out_path = run_dir / "training_stage_breakdown.png"
+    fig.savefig(out_path, dpi=140)
+    print(f"[plots] wrote {out_path}", flush=True)
+    return out_path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
     args = parser.parse_args()
     plot_throughput_bar(args.run_dir)
+    plot_training_stage_breakdown(args.run_dir)
     write_latency_table(args.run_dir)
     return 0
 

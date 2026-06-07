@@ -89,7 +89,7 @@ def _start_daemon(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = open(log_path, "w")
     cmd = [
-        str(binary), "daemon", "--no-mount", "--root", str(root),
+        str(binary), "daemon", "--no-mount", "--no-wal", "--root", str(root),
         f"--mutex-profile-rate={mutex_rate}",
         f"--block-profile-rate={block_rate}",
     ]

@@ -54,6 +54,8 @@ def plot_mutation(run_dir: Path, out_path: Path | None = None) -> Path:
 
     if rows[0].get("scenario") == "image_endurance":
         return plot_image_endurance(run_dir, out_path)
+    if rows[0].get("scenario") == "format_mutation":
+        return plot_format_mutation(run_dir, out_path)
 
     # Convert byte metrics to MiB to keep axes readable.
     for row in rows:
@@ -73,6 +75,33 @@ def plot_mutation(run_dir: Path, out_path: Path | None = None) -> Path:
     fig.tight_layout(rect=(0, 0, 1, 0.94))
 
     out = out_path or (run_dir / "mutation_benchmark.png")
+    fig.savefig(out, dpi=160)
+    plt.close(fig)
+    return out
+
+
+def plot_format_mutation(run_dir: Path, out_path: Path | None = None) -> Path:
+    rows = _read_rows(run_dir / "summary.csv")
+    grouped: dict[tuple[str, float], list[float]] = defaultdict(list)
+    for row in rows:
+        key = (row.get("format", "format"), _f(row, "changed_files"))
+        grouped[key].append(_f(row, "mean_operation_ms"))
+
+    series: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for (fmt, changed), values in grouped.items():
+        series[fmt].append((changed, _mean(values)))
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for fmt, points in sorted(series.items()):
+        points = sorted(points)
+        ax.plot([p[0] for p in points], [p[1] for p in points], marker="o", linewidth=2, label=fmt)
+    ax.set_xlabel("changed files")
+    ax.set_ylabel("mean operation time, ms")
+    ax.set_title("Random File Replacement Cost Without Training")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    out = out_path or (run_dir / "mutation_format_compare.png")
     fig.savefig(out, dpi=160)
     plt.close(fig)
     return out

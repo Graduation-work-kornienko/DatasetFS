@@ -62,6 +62,9 @@ def train_one_epoch(
     n_batches = 0
     n_samples = 0
     compute_times: list[float] = []
+    zero_grad_times: list[float] = []
+    forward_backward_times: list[float] = []
+    optimizer_step_times: list[float] = []
     losses: list[float] = []
 
     time_to_first: float | None = None
@@ -78,11 +81,17 @@ def train_one_epoch(
             t_steady_start = time.perf_counter()
 
         t_compute_start = time.perf_counter()
+        t_stage = time.perf_counter()
         optim.zero_grad()
+        zero_grad_times.append(time.perf_counter() - t_stage)
+        t_stage = time.perf_counter()
         out = _forward(model, inputs)
         loss = loss_fn(out, targets)
         loss.backward()
+        forward_backward_times.append(time.perf_counter() - t_stage)
+        t_stage = time.perf_counter()
         optim.step()
+        optimizer_step_times.append(time.perf_counter() - t_stage)
         compute_times.append(time.perf_counter() - t_compute_start)
 
         losses.append(float(loss.item()))
@@ -107,6 +116,9 @@ def train_one_epoch(
         time_to_first_batch=time_to_first or 0.0,
         fetch_latency_seconds=timed.fetch_latencies,
         compute_seconds=compute_times,
+        zero_grad_seconds=zero_grad_times,
+        forward_backward_seconds=forward_backward_times,
+        optimizer_step_seconds=optimizer_step_times,
         steady_n_samples=steady_n_samples,
         steady_wall_seconds=steady_wall,
     )

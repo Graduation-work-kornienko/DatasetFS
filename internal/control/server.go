@@ -105,6 +105,7 @@ func StartServer(coreIdx *index.CoreIndex, strg *storage.Storage) {
 	})
 
 	http.HandleFunc("/metrics", metrics.Handler())
+	http.HandleFunc("/metrics/pipeline", metrics.PipelineHandler())
 
 	http.HandleFunc("/initialize_loading", func(w http.ResponseWriter, r *http.Request) {
 		numWorkers := 1

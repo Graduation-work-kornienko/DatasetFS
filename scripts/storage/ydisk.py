@@ -34,6 +34,7 @@ idempotent (a remote file is skipped when it already exists with the same size).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -257,12 +258,24 @@ def push(client, local: str, remote: str) -> None:
     # Directory: walk and mirror under `remote`.
     files = sorted(p for p in local_path.rglob("*") if p.is_file())
     _ensure_remote_dirs(client, remote)
+    complete = f"{remote}/.complete"
+    if client.exists(complete):
+        client.remove(complete, permanently=True)
     total = len(files)
     for i, f in enumerate(files, 1):
         rel = f.relative_to(local_path).as_posix()
         dst = f"{remote}/{rel}"
         _ensure_remote_dirs(client, str(PurePosixPath(dst).parent))
         _push_file(client, f, dst, prefix=f"[{i}/{total}] ")
+    marker = local_path / ".ydisk_complete.json"
+    marker.write_text(
+        json.dumps({"files": total, "bytes": sum(f.stat().st_size for f in files)}, sort_keys=True),
+        encoding="utf-8",
+    )
+    try:
+        _push_file(client, marker, complete, prefix=f"[{total + 1}/{total + 1}] ")
+    finally:
+        marker.unlink(missing_ok=True)
 
 
 def _push_file(client, local_file: Path, remote: str, prefix: str = "") -> None:

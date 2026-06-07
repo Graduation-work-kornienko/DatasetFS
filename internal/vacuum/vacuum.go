@@ -216,7 +216,7 @@ type fileEntry struct {
 
 // --- manifest backup / atomic store helpers -----------------------------
 
-var manifestNames = []string{"metadata.parquet", "metadata.jsonl"}
+var manifestNames = []string{"metadata.parquet"}
 
 // walFileName mirrors the (unexported) constant in package index.
 const walFileName = "wal.log"
@@ -244,7 +244,7 @@ func backupManifest(root string) error {
 		found = true
 	}
 	if !found {
-		return fmt.Errorf("no manifest file (metadata.parquet/.jsonl) in %s", root)
+		return fmt.Errorf("no metadata.parquet in %s", root)
 	}
 	return nil
 }

@@ -147,6 +147,18 @@ var SHMWriteLatency = NewLatencyTracker(8192)
 // DealerEmitLatency measures binary frame serialization + FIFO write latency.
 var DealerEmitLatency = NewLatencyTracker(8192)
 
+// StorageReadLatency measures shard bytes read from local storage/cache into a slot.
+var StorageReadLatency = NewLatencyTracker(8192)
+
+// MetadataBuildLatency measures per-shard Metadata remapping after a shard read.
+var MetadataBuildLatency = NewLatencyTracker(8192)
+
+// FrameEncodeLatency measures binary frame construction before FIFO write.
+var FrameEncodeLatency = NewLatencyTracker(8192)
+
+// PipeWriteLatency measures FIFO write time after a frame is encoded.
+var PipeWriteLatency = NewLatencyTracker(8192)
+
 // --- JSON snapshot ----------------------------------------------------------
 
 type histogram struct {
@@ -177,6 +189,11 @@ type Snapshot struct {
 	Histograms map[string]histogram `json:"histograms"`
 }
 
+type PipelineSnapshot struct {
+	Counters   map[string]int64     `json:"counters"`
+	Histograms map[string]histogram `json:"histograms"`
+}
+
 func collect() Snapshot {
 	return Snapshot{
 		Counters: map[string]int64{
@@ -200,11 +217,38 @@ func collect() Snapshot {
 		},
 		Histograms: map[string]histogram{
 			"load_latency":              LoadLatency.histogram(),
+			"storage_read_latency":      StorageReadLatency.histogram(),
+			"metadata_build_latency":    MetadataBuildLatency.histogram(),
 			"remote_fetch_latency":      RemoteFetchLatency.histogram(),
 			"remote_shard_wait_latency": RemoteShardWaitLatency.histogram(),
 			"decode_latency":            DecodeLatency.histogram(),
 			"shm_write_latency":         SHMWriteLatency.histogram(),
 			"dealer_emit_latency":       DealerEmitLatency.histogram(),
+			"frame_encode_latency":      FrameEncodeLatency.histogram(),
+			"pipe_write_latency":        PipeWriteLatency.histogram(),
+		},
+	}
+}
+
+func collectPipeline() PipelineSnapshot {
+	return PipelineSnapshot{
+		Counters: map[string]int64{
+			"shard_loads_total":         ShardLoadsTotal.Load(),
+			"bytes_read_total":          BytesReadTotal.Load(),
+			"slot_starvation_total":     SlotStarvationTotal.Load(),
+			"dealer_batches_sent_total": DealerBatchesSentTotal.Load(),
+			"samples_emitted_total":     SamplesEmittedTotal.Load(),
+			"epochs_completed_total":    EpochsCompletedTotal.Load(),
+		},
+		Histograms: map[string]histogram{
+			"load_latency":           LoadLatency.histogram(),
+			"storage_read_latency":   StorageReadLatency.histogram(),
+			"metadata_build_latency": MetadataBuildLatency.histogram(),
+			"decode_latency":         DecodeLatency.histogram(),
+			"shm_write_latency":      SHMWriteLatency.histogram(),
+			"dealer_emit_latency":    DealerEmitLatency.histogram(),
+			"frame_encode_latency":   FrameEncodeLatency.histogram(),
+			"pipe_write_latency":     PipeWriteLatency.histogram(),
 		},
 	}
 }
@@ -214,5 +258,14 @@ func Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(collect())
+	}
+}
+
+// PipelineHandler returns pipeline-stage counters/histograms without unrelated
+// remote/cache gauges. This keeps benchmark parsers focused on stage timings.
+func PipelineHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(collectPipeline())
 	}
 }

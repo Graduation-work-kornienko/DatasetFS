@@ -81,11 +81,10 @@ type JSONWAL struct {
 // openWAL opens (or creates) the WAL file at <root>/wal.log in append+rw mode.
 // The file is positioned at end (O_APPEND); Replay seeks to start, then back.
 // The format parameter specifies the WAL format to use ("json" or "binary").
-// If format is empty, defaults to "json".
+// If format is empty, defaults to the optimized binary WAL.
 func OpenWALWithFormat(root, format string) (WAL, error) {
-	// Default to JSON format if not specified
 	if format == "" {
-		format = walFormatJSON
+		format = walFormatBinary
 	}
 
 	path := filepath.Join(root, walFileName)

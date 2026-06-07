@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 import tarfile
 from pathlib import Path
 
-from scripts.datasets.datasetfs_writer import DatasetFSWriter
+from scripts.datasets.datasetfs_writer import DatasetFSWriter, read_parquet_manifest
 
 
 def test_datasetfs_writer_manifest_offsets_and_shard_rollover(tmp_path: Path):
@@ -18,8 +17,10 @@ def test_datasetfs_writer_manifest_offsets_and_shard_rollover(tmp_path: Path):
         for name, payload in payloads.items():
             writer.add(name, payload, {"label": name[0]})
 
-    manifest = json.loads((out / "metadata.jsonl").read_text(encoding="utf-8"))
+    manifest = read_parquet_manifest(out)
     assert (out / ".done").exists()
+    assert (out / "metadata.parquet").exists()
+    assert not (out / "metadata.jsonl").exists()
     assert set(manifest["files"]) == set(payloads)
     assert len(manifest["shards_meta"]) >= 2
 

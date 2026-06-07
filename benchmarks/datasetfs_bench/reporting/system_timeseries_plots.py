@@ -94,6 +94,13 @@ def plot_system_timeseries(run_dir: Path, out_path: Path | None = None) -> Path:
     if wx:
         axes[1][1].plot(wx, [v / (1024 * 1024) for v in wy], linewidth=1.8, label="write")
         plotted = True
+    disk_ax = axes[1][1].twinx()
+    disk_plotted = False
+    disk_plotted |= _plot_metric(disk_ax, rows, "disk_free_bytes", "free", 1024 ** 3)
+    disk_plotted |= _plot_metric(disk_ax, rows, "disk_used_bytes", "used", 1024 ** 3)
+    if disk_plotted:
+        plotted = True
+        disk_ax.set_ylabel("GiB")
     axes[1][1].set_title("Disk I/O Rate")
     axes[1][1].set_ylabel("MiB/sec")
 
@@ -107,6 +114,9 @@ def plot_system_timeseries(run_dir: Path, out_path: Path | None = None) -> Path:
         handles, _labels = ax.get_legend_handles_labels()
         if handles:
             ax.legend()
+    handles, _labels = disk_ax.get_legend_handles_labels()
+    if handles:
+        disk_ax.legend(loc="lower right")
     fig.suptitle("System Resource Timeline", y=0.98)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
 

@@ -1,6 +1,7 @@
 package index
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"sync"
@@ -8,6 +9,18 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestOpenWALWithFormat_DefaultsToBinary(t *testing.T) {
+	dir := t.TempDir()
+	w, err := OpenWALWithFormat(dir, "")
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	raw, err := os.ReadFile(filepath.Join(dir, "wal.log"))
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(raw), walHeaderSize)
+	require.Equal(t, walMagic, binary.LittleEndian.Uint32(raw[:4]))
+}
 
 // TestBinaryWAL_RoundTripAndReplay mirrors the JSON WAL tests against the
 // binary format: add/delete/shard records survive a close+reopen and replay

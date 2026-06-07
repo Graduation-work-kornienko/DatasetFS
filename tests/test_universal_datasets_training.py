@@ -38,7 +38,7 @@ SEED = 123
 
 
 def _build_datasetfs_root(root: Path, objects: list[tuple[str, bytes, dict]]) -> None:
-    """Create one uncompressed DatasetFS shard plus JSON manifest."""
+    """Create one uncompressed DatasetFS shard plus Parquet manifest."""
     with DatasetFSWriter(root) as writer:
         for name, payload, meta in objects:
             writer.add(name, payload, meta)
