@@ -1,25 +1,31 @@
 # Remote streaming comparison (DatasetFS HTTP remote vs WebDataset HTTP).
 #
-# This config intentionally contains placeholder URLs. The runner does not upload
-# or download large datasets implicitly; stage matching DatasetFS/WebDataset
-# artifacts on the same HTTP origin, then override the URLs before running.
+# This config intentionally points at a small staged subset. The runner does not
+# upload or download full datasets implicitly; stage matching DatasetFS/WebDataset
+# artifacts on the same HTTP origin, capped by remote_limits.max_total_bytes.
 #
-# Expected layout:
-#   DatasetFS remote root:   http://host/datasetfs_root/  (metadata.jsonl + shards)
-#   WebDataset remote base:  http://host/webdataset/      (shard-000000.tar, ...)
+# Expected staged layout (created by scripts.bench.stage_remote_publaynet_subset):
+#   runs/remote_stage/publaynet/datasetfs   (metadata.parquet + selected shards)
+#   runs/remote_stage/publaynet/webdataset  (selected shard-*.tar)
 #
 # Both loaders are throttled to the same nominal bandwidth:
 #   - DatasetFS: daemon --remote-throttle bytes/sec
 #   - WebDataset: curl --limit-rate via wds_http_mode=curl
 
+remote_limits:
+  # Hard preflight guard: fail before running if either staged remote format is
+  # larger than this. 6 GiB keeps the remote experiment bounded and prevents
+  # accidentally benchmarking/downloading a full dataset.
+  max_total_bytes: 6442450944
+
 dataset:
-  name: remote_streaming
-  imagefolder: data/formats/imagenette/imagefolder
-  webdataset: data/formats/imagenette/webdataset
-  datasetfs: data/formats/imagenette/datasetfs
+  name: publaynet_remote_subset
+  imagefolder: runs/remote_stage/publaynet/imagefolder
+  webdataset: runs/remote_stage/publaynet/webdataset
+  datasetfs: runs/remote_stage/publaynet/datasetfs
   webdataset_remote:
     http_base: http://127.0.0.1:8000/webdataset
-    num_shards: 1
+    num_shards: 12
     shard_pattern: shard-{i:06d}.tar
     wds_http_mode: curl
     wds_curl_limit_rate: 20m
@@ -27,6 +33,7 @@ dataset:
 datasetfs_remote:
   root_url: http://127.0.0.1:8000/datasetfs
   cache_dir: runs/remote_cache
+  cleanup_cache_after_run: true
   prefetch_concurrency: 2
   remote_throttle: 20971520
 
@@ -39,6 +46,7 @@ epochs: 2
 warmup_epochs: 1
 max_batches_per_epoch: 80
 warmup_batches: 5
+dfs_timeout_seconds: 60
 
 seeds: [0, 1, 2]
 

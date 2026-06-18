@@ -6,12 +6,14 @@
 # `synthetic` is the compute-only ceiling; the gap to it is each format's tax.
 # `ffcv` auto-skips on macOS (Linux-only) — the runner logs SKIP and moves on.
 #
-# Metrics discipline (HANDOFF): hypothesis = "DFS is competitive/faster in the
-# loader-bound regime because server-side decode + zero-copy SHM remove PIL and
-# copies from the Python critical path; byte-store formats (LMDB/HDF5/TFRecord)
-# win on no-per-file-open + page-cache locality vs ImageFolder." The full metric
-# set (sps, TTFB, stall%, fetch p50/95/99, sys CPU/RSS/disk, DFS /metrics) is
-# captured per cell by the runner.
+# Metrics discipline: hypothesis = "DFS is competitive in the loader-bound
+# regime as a packed byte-store with shared-memory transport; byte-store formats
+# (LMDB/HDF5/TFRecord) win on no-per-file-open + page-cache locality vs
+# ImageFolder." Server-side rgb_uint8 decode is intentionally excluded from the
+# main matrix because diagnostics show it is CPU/priming sensitive on Imagenette;
+# keep it in diagnostic_datasetfs_rgb.yaml until the daemon decode path is tuned.
+# The full metric set (sps, TTFB, stall%, fetch p50/95/99, sys CPU/RSS/disk, DFS
+# /metrics) is captured per cell by the runner.
 
 dataset:
   name: imagenette
@@ -26,7 +28,7 @@ dataset:
 
 model: simplecnn
 batch_size: 64
-num_workers: 4
+num_workers: 2
 image_size: 96
 
 epochs: 2
@@ -40,18 +42,10 @@ max_batches_per_epoch: 80
 warmup_batches: 10
 
 seeds: [0, 1, 2]
-# DatasetFS appears TWICE on purpose (two distinct bars):
-#   - datasetfs      : raw mode, Python-side PIL decode — apples-to-apples vs the
-#                      other byte-store formats, all of which decode in Python.
-#   - datasetfs-rgb  : server-side rgb_uint8 + parallel decode (opt 01/02) — DFS's
-#                      unique edge; the daemon decodes off the Python critical path.
-# The gap between the two bars IS the server-side-decode win, shown in-context
-# against every competing format (this is the G1+G2 headline folded together).
 loaders:
   - imagefolder
   - webdataset
   - datasetfs
-  - {format: datasetfs, name: datasetfs-rgb, dfs_decode_mode: rgb_uint8, dfs_decode_parallelism: 0}
   - huggingface
   - lmdb
   - hdf5

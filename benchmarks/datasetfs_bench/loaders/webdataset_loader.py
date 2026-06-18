@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import functools
 import glob
+import hashlib
 import shlex
 from pathlib import Path
 from typing import ClassVar
@@ -30,6 +31,10 @@ def _decode_sample(sample, decode, data_keys):
     return decode(data), label
 
 
+def _cache_name(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest() + ".tar"
+
+
 class WebDatasetLoader(BaseLoader):
     name: ClassVar[str] = "webdataset"
 
@@ -40,6 +45,10 @@ class WebDatasetLoader(BaseLoader):
             raise ImportError("install `webdataset` to use this loader") from e
 
         self._shards = self._resolve_shards()
+        self._cache_dir = self.spec.get("wds_cache_dir")
+        if self._cache_dir:
+            Path(self._cache_dir).mkdir(parents=True, exist_ok=True)
+        self._cache_size = int(self.spec.get("wds_cache_size", -1))
         modality = self.spec.get("modality", "image")
         self._decode = make_sample_decoder(modality, self.image_size)
         self._data_keys = _AUDIO_KEYS if modality == "audio" else _IMAGE_KEYS
@@ -51,6 +60,14 @@ class WebDatasetLoader(BaseLoader):
         ``wds_http_mode: curl`` to stream via ``pipe:curl``."""
         # Explicit URL list wins.
         urls = self.spec.get("shard_urls")
+        if not urls and self.spec.get("ydisk_remote_root"):
+            from scripts.storage import ydisk
+
+            client = ydisk.get_client()
+            root = ydisk._norm_remote(str(self.spec["ydisk_remote_root"]))  # type: ignore[attr-defined]
+            n = int(self.spec["num_shards"])
+            pattern = self.spec.get("shard_pattern", "shard-{i:06d}.tar")
+            urls = [client.get_download_link(f"{root}/{pattern.format(i=i)}") for i in range(n)]
         if not urls and self.spec.get("http_base"):
             base = str(self.spec["http_base"]).rstrip("/")
             n = int(self.spec["num_shards"])
@@ -72,10 +89,14 @@ class WebDatasetLoader(BaseLoader):
     def make_loader(self) -> DataLoader:
         import webdataset as wds
 
+        kwargs = {"shardshuffle": 100, "empty_check": False}
+        if self._cache_dir:
+            kwargs.update(cache_dir=str(self._cache_dir), cache_size=self._cache_size, url_to_name=_cache_name)
+
         ds = (
             # shardshuffle=100 = shuffle the shard list with buffer 100 (>= our
             # shard count, so effectively a full reshuffle every epoch).
-            wds.WebDataset(self._shards, shardshuffle=100, empty_check=False)
+            wds.WebDataset(self._shards, **kwargs)
             .shuffle(1000)
             .map(functools.partial(_decode_sample, decode=self._decode, data_keys=self._data_keys))
         )

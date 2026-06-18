@@ -21,11 +21,15 @@ class CheckResult:
 
 
 def _join_url(base: str, suffix: str) -> str:
+    if base.startswith("ydisk://"):
+        return base.rstrip("/") + "/" + suffix.lstrip("/")
     return urljoin(base.rstrip("/") + "/", suffix.lstrip("/"))
 
 
 def datasetfs_urls(cfg: dict) -> list[str]:
     remote = cfg.get("datasetfs_remote") or {}
+    if remote.get("manifest_url"):
+        return [str(remote["manifest_url"])]
     root = remote.get("root_url")
     if not root:
         return []
@@ -46,6 +50,11 @@ def datasetfs_shard_urls_from_manifest(root_url: str, manifest_path: Path, max_s
     return [_join_url(root_url, f"shard_{i}") for i in shard_ids[:max_shards]]
 
 
+def datasetfs_total_bytes_from_manifest(manifest_path: Path) -> int:
+    manifest = read_parquet_manifest(manifest_path.parent)
+    return sum(int(s.get("total_size", 0) or 0) for s in manifest.get("shards_meta", {}).values())
+
+
 def webdataset_urls(cfg: dict) -> list[str]:
     ds = cfg.get("dataset") or {}
     remote = ds.get("webdataset_remote") or {}
@@ -54,7 +63,12 @@ def webdataset_urls(cfg: dict) -> list[str]:
         return [str(u) for u in urls]
     base = remote.get("http_base")
     if not base:
+        base = remote.get("ydisk_remote_root")
+    if not base:
         return []
+    base = str(base)
+    if not base.startswith(("http://", "https://", "ydisk://")) and remote.get("ydisk_remote_root"):
+        base = "ydisk://" + base.lstrip("/")
     n = int(remote.get("num_shards", 0) or 0)
     pattern = remote.get("shard_pattern", "shard-{i:06d}.tar")
     return [_join_url(str(base), pattern.format(i=i)) for i in range(n)]
@@ -72,6 +86,22 @@ def _probe_url(url: str, timeout: float) -> CheckResult:
             r.close()
     except Exception as e:
         return CheckResult(url, False, repr(e))
+
+
+def _content_length(url: str, timeout: float) -> tuple[CheckResult, int | None]:
+    try:
+        r = requests.head(url, allow_redirects=True, timeout=timeout)
+        try:
+            if r.status_code not in (200, 206):
+                return CheckResult(url, False, f"HEAD HTTP {r.status_code}"), None
+            raw = r.headers.get("Content-Length")
+            if raw is None:
+                return CheckResult(url, False, "HEAD missing Content-Length"), None
+            return CheckResult(url, True, f"Content-Length={raw}"), int(raw)
+        finally:
+            r.close()
+    except Exception as e:
+        return CheckResult(url, False, repr(e)), None
 
 
 def _download_manifest(url: str, timeout: float) -> tuple[CheckResult, Path | None, tempfile.TemporaryDirectory | None]:
@@ -127,12 +157,16 @@ def validate_config(cfg: dict) -> list[CheckResult]:
         results.append(CheckResult("datasetfs_remote.root_url", False, "not set"))
     if not webdataset_urls(cfg):
         results.append(CheckResult("dataset.webdataset_remote", False, "no shard URLs resolved"))
+    max_total = int((cfg.get("remote_limits") or {}).get("max_total_bytes", 0) or 0)
+    if max_total <= 0:
+        results.append(CheckResult("remote_limits.max_total_bytes", False, "not set"))
     return results
 
 
 def run_preflight(config_path: Path, timeout: float = 5.0, check_urls: bool = True) -> list[CheckResult]:
     cfg = yaml.safe_load(config_path.read_text())
     results = validate_config(cfg)
+    max_total = int((cfg.get("remote_limits") or {}).get("max_total_bytes", 0) or 0)
     if check_urls:
         remote = cfg.get("datasetfs_remote") or {}
         root_url = str(remote.get("root_url") or "")
@@ -141,6 +175,13 @@ def run_preflight(config_path: Path, timeout: float = 5.0, check_urls: bool = Tr
             results.append(result)
             try:
                 if manifest_path is not None:
+                    total = datasetfs_total_bytes_from_manifest(manifest_path)
+                    ok = max_total <= 0 or total <= max_total
+                    results.append(CheckResult(
+                        "datasetfs_remote.total_bytes",
+                        ok,
+                        f"{total} bytes (limit {max_total})",
+                    ))
                     for shard_url in datasetfs_shard_urls_from_manifest(root_url, manifest_path):
                         results.append(_probe_url(shard_url, timeout))
             finally:
@@ -148,8 +189,20 @@ def run_preflight(config_path: Path, timeout: float = 5.0, check_urls: bool = Tr
                     td.cleanup()
         for url in datasetfs_legacy_urls(cfg):
             results.append(_probe_absent(url, timeout))
+        wds_total = 0
+        wds_known = True
         for url in webdataset_urls(cfg):
             results.append(_probe_url(url, timeout))
+            size_result, size = _content_length(url, timeout)
+            results.append(size_result)
+            if size is None:
+                wds_known = False
+            else:
+                wds_total += size
+        if webdataset_urls(cfg):
+            ok = wds_known and (max_total <= 0 or wds_total <= max_total)
+            detail = f"{wds_total} bytes (limit {max_total})" if wds_known else "unknown: missing Content-Length"
+            results.append(CheckResult("webdataset_remote.total_bytes", ok, detail))
     return results
 
 

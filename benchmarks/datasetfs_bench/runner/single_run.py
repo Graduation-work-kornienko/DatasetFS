@@ -72,6 +72,22 @@ LOADER_CLASSES = {
     "synthetic": SyntheticLoader,
 }
 
+
+def _load_dotenv_var(name: str) -> None:
+    if os.environ.get(name):
+        return
+    dotenv = REPO_ROOT / ".env"
+    if not dotenv.is_file():
+        return
+    for line in dotenv.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == name:
+            os.environ[name] = value.strip().strip('"').strip("'")
+            return
+
 # Formats whose prepared data lives at cfg["dataset"][<name>] (falling back to
 # the conventional data/formats/<ds>/<name> path) and whose loader just needs
 # that root. Keeps _build_loader from growing one branch per format.
@@ -142,6 +158,10 @@ def _build_loader(loader_name: str, cfg: dict, label_to_idx: dict, seed: int):
         spec = {**common, "root": ds["webdataset"]}
         if "webdataset_remote" in ds:
             spec.update(ds["webdataset_remote"])
+        if "wds_cache_dir" in cfg:
+            spec["wds_cache_dir"] = cfg["wds_cache_dir"]
+        if "wds_cache_size" in cfg:
+            spec["wds_cache_size"] = cfg["wds_cache_size"]
         return cls(spec)
     if loader_name == "datasetfs":
         spec = {**common, "root": ds["datasetfs"]}
@@ -158,6 +178,8 @@ def _build_loader(loader_name: str, cfg: dict, label_to_idx: dict, seed: int):
         # per pipeline. 0/absent = auto (NumCPU/num_workers).
         if "dfs_decode_parallelism" in cfg:
             spec["decode_parallelism"] = cfg["dfs_decode_parallelism"]
+        if "dfs_timeout_seconds" in cfg:
+            spec["timeout_seconds"] = cfg["dfs_timeout_seconds"]
         return cls(spec)
     if loader_name == "synthetic":
         spec = {**common}
@@ -236,7 +258,8 @@ def _run_one_cell(
                 f"  epoch={epoch} sps={ep_stats.samples_per_second:.1f} "
                 f"steady_sps={ep_stats.steady_samples_per_second:.1f} "
                 f"TTFB={ep_stats.time_to_first_batch:.2f}s "
-                f"stall={ep_stats.stall_fraction:.2%}",
+                f"steady_wait={ep_stats.steady_batch_wait_fraction:.2%} "
+                f"full_wait={ep_stats.stall_fraction:.2%}",
                 flush=True,
             )
             stats.append((ep_stats, epoch_daemon_summary))
@@ -274,6 +297,25 @@ def _write_summary(out_dir: Path, rows: list[dict]) -> None:
     print(f"\n[runner] wrote {csv_path}", flush=True)
 
 
+def _resolve_cache_dir(path: str | Path | None) -> Path | None:
+    if path is None:
+        return None
+    p = Path(path)
+    return p if p.is_absolute() else REPO_ROOT / p
+
+
+def _clear_cache_dir(path: str | Path | None, label: str) -> None:
+    p = _resolve_cache_dir(path)
+    if p is None:
+        return
+    if p in (Path("/"), Path.home(), REPO_ROOT):
+        raise ValueError(f"refusing to clear unsafe {label} cache path: {p}")
+    if p.exists():
+        print(f"[runner] clear {label} cache: {p}", flush=True)
+        shutil.rmtree(p)
+    p.mkdir(parents=True, exist_ok=True)
+
+
 def run_config(cfg: dict, out_dir: Path) -> list[dict]:
     """Run all (loader, seed) cells for one config; return per-epoch summary rows.
 
@@ -282,6 +324,9 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     host_info.write(out_dir / "host_info.json")
+
+    if str((cfg.get("datasetfs_remote") or {}).get("root_url", "")).startswith("ydisk://"):
+        _load_dotenv_var("YADISK_TOKEN")
 
     label_to_idx = _label_to_idx(Path(cfg["dataset"]["imagefolder"]))
     print(f"[runner] {len(label_to_idx)} classes", flush=True)
@@ -302,6 +347,7 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
             cwd=REPO_ROOT,
             log_path=out_dir / "daemon.log",
             cache_dir=remote.get("cache_dir"),
+            remote_manifest_url=remote.get("manifest_url"),
             prefetch_concurrency=remote.get("prefetch_concurrency"),
             remote_throttle=remote.get("remote_throttle"),
         )
@@ -324,6 +370,11 @@ def run_config(cfg: dict, out_dir: Path) -> list[dict]:
         for display_name, loader_format, overrides in cells:
             cfg_eff = {**cfg, **overrides}
             for seed in cfg["seeds"]:
+                if cfg_eff.get("reset_remote_caches_before_seed"):
+                    if loader_format == "datasetfs":
+                        _clear_cache_dir((cfg_eff.get("datasetfs_remote") or {}).get("cache_dir"), display_name)
+                    if loader_format == "webdataset":
+                        _clear_cache_dir(cfg_eff.get("wds_cache_dir"), display_name)
                 # Drop OS page cache before each cell for fair I/O measurement.
                 cache_state = "uncontrolled"
                 if drop_caches:

@@ -48,8 +48,6 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 				return
 			}
 
-			log.Printf("[Loader] Нужно загрузить Слот %d", job.SlotID)
-
 			loadStart := time.Now()
 			// EnsureShard returns a guaranteed-complete local path: a no-op for
 			// local datasets, or (for remote/streaming) blocks until the shard
@@ -65,18 +63,22 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 				log.Printf("[Loader] ❌ Ошибка открытия шарда %d: %v", job.ShardID, err)
 				continue
 			}
-			defer file.Close()
 
 			targetSlice := b.allocator.GetSlotBuffer(job.SlotID)
 
 			readStart := time.Now()
 			n, err := io.ReadFull(file, targetSlice[:job.Shard.TotalSize])
+			closeErr := file.Close()
 			readElapsed := time.Since(readStart)
 			metrics.StorageReadLatency.Record(readElapsed)
 			metrics.SHMWriteLatency.Record(readElapsed)
 
 			if err != nil {
 				log.Printf("[Loader] ❌ Ошибка io.ReadFull для шарда %d: %v", job.ShardID, err)
+				continue
+			}
+			if closeErr != nil {
+				log.Printf("[Loader] ❌ Ошибка закрытия шарда %d: %v", job.ShardID, closeErr)
 				continue
 			}
 
@@ -108,8 +110,6 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 			}
 			metrics.MetadataBuildLatency.Record(time.Since(metaStart))
 
-			log.Printf("[Loader] Загружен Слот %d , шард %d файлов %d (Валидных файлов: %d). Передаю Dealer.", job.SlotID, job.ShardID, len(job.Shard.Objects), len(validMeta))
-
 			if len(validMeta) == 0 {
 				select {
 				case b.freeSlotChan <- job.SlotID:
@@ -118,7 +118,6 @@ func (b *BackgroundLoader) Launch(ctx context.Context) {
 				}
 				continue
 			}
-			log.Printf("[Loader] ✅ Загружен Слот %d (Валидных файлов: %d). Передаю Dealer.", job.SlotID, len(validMeta))
 
 			// ctx-guarded: on session teardown the downstream stage may have
 			// stopped draining; we must not block here or Stop() would hang and

@@ -28,6 +28,7 @@ dfs_decode_mode: rgb_uint8
 epochs: 2
 warmup_epochs: 1
 max_batches_per_epoch: 60
+warmup_batches: 10
 
 seeds: [0, 1, 2]
 loaders: [datasetfs]

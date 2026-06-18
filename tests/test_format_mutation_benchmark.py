@@ -11,8 +11,10 @@ from benchmarks.datasetfs_bench.reporting.mutation_plots import plot_mutation
 from benchmarks.datasetfs_bench.reporting.report import generate_report
 from benchmarks.datasetfs_bench.runner.mutation_bench import (
     PlannedMutation,
+    prepare_flat_imagefolder,
     prepare_flat_webdataset,
     _replace_webdataset_files,
+    _write_dfstx,
     _write_rows_union,
 )
 
@@ -42,6 +44,20 @@ def test_webdataset_format_mutation_rewrites_selected_members(tmp_path: Path):
                     assert tf.extractfile(member).read() == b"changed"
                     found = True
     assert found
+
+
+def test_format_mutation_accepts_wav_imagefolder(tmp_path: Path):
+    src = tmp_path / "audiofolder"
+    (src / "yes").mkdir(parents=True)
+    (src / "no").mkdir(parents=True)
+    (src / "yes" / "a.wav").write_bytes(b"wav-a")
+    (src / "no" / "b.wav").write_bytes(b"wav-b")
+
+    out = tmp_path / "flat"
+    names = prepare_flat_imagefolder(src, out, max_files=None, seed=1)
+
+    assert len(names) == 2
+    assert all((out / name).exists() for name in names)
 
 
 def test_format_mutation_plot_and_report(tmp_path: Path):
@@ -83,3 +99,15 @@ def test_format_mutation_plot_and_report(tmp_path: Path):
     text = report.read_text(encoding="utf-8")
     assert "| format | changed files | rows | mean op, ms" in text
     assert "mutation_format_compare.png" in text
+
+
+def test_write_dfstx_binary_format(tmp_path: Path):
+    path = tmp_path / "ops.dfstx"
+    _write_dfstx(path, [(1, "a.bin", "put/payload_000000"), (2, "b.bin", ""), (3, "c.bin", "d.bin")])
+
+    data = path.read_bytes()
+    assert data[:4] == b"DFTX"
+    assert int.from_bytes(data[4:6], "little") == 1
+    assert int.from_bytes(data[6:8], "little") == 0
+    assert int.from_bytes(data[8:12], "little") == 3
+    assert data[12] == 1

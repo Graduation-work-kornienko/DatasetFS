@@ -71,6 +71,7 @@ class DatasetFSLoader(BaseLoader):
             seed=self.seed,
             transform=self._transform,
             daemon_url=self._daemon_url,
+            timeout_seconds=float(self.spec.get("timeout_seconds", 120.0)),
         )
         if self._decode_fn is not None:
             kwargs["decode_fn"] = self._decode_fn

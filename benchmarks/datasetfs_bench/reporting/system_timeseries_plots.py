@@ -39,6 +39,20 @@ def _counter_rate(rows: list[dict], key: str) -> tuple[list[float], list[float]]
     return xs, ys
 
 
+def _group_rows(rows: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        name = row.get("vacuum_scenario") or row.get("scenario") or "run"
+        grouped.setdefault(name, []).append(row)
+    for values in grouped.values():
+        values.sort(key=lambda r: _f(r, "t"))
+        if values:
+            start = _f(values[0], "t")
+            for row in values:
+                row["t_rel"] = _f(row, "t") - start
+    return grouped
+
+
 def _plot_metric(ax, rows: list[dict], key: str, label: str, scale: float = 1.0) -> bool:
     points = [(r, _f(r, key) / scale) for r in rows if key in r and r.get(key, "") != ""]
     if not points:
@@ -67,58 +81,42 @@ def plot_system_timeseries(run_dir: Path, out_path: Path | None = None) -> Path:
     if not rows:
         raise ValueError(f"no rows in {ts_path}")
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+    grouped = _group_rows(rows)
+    fig, axes = plt.subplots(3, 1, figsize=(13, 9), sharex=True)
     plotted = False
 
-    plotted |= _plot_metric(axes[0][0], rows, "cpu_percent", "system CPU %")
-    axes[0][0].set_title("System CPU")
-    axes[0][0].set_ylabel("CPU %")
+    for name, values in grouped.items():
+        xs = [_f(r, "t_rel") for r in values]
+        if any(r.get("cpu_percent", "") != "" for r in values):
+            axes[0].plot(xs, [_f(r, "cpu_percent") for r in values], linewidth=1.5, label=name)
+            plotted = True
+        if any(r.get("tracked_rss_bytes", "") != "" for r in values):
+            axes[1].plot(xs, [_f(r, "tracked_rss_bytes") / (1024 * 1024) for r in values], linewidth=1.5, label=name)
+            plotted = True
+        wx, wy = _counter_rate(values, "disk_write_bytes")
+        if wx:
+            start = _f(values[0], "t") if values else 0.0
+            axes[2].plot([x - start for x in wx], [v / (1024 * 1024) for v in wy], linewidth=1.5, label=name)
+            plotted = True
 
-    plotted |= _plot_metric(axes[0][1], rows, "tracked_rss_bytes", "tracked RSS", 1024 * 1024)
-    plotted |= _plot_metric(axes[0][1], rows, "python_rss_bytes", "Python RSS", 1024 * 1024)
-    plotted |= _plot_metric(axes[0][1], rows, "daemon_rss_bytes", "daemon RSS", 1024 * 1024)
-    axes[0][1].set_title("RSS")
-    axes[0][1].set_ylabel("MiB")
-
-    plotted |= _plot_metric(axes[1][0], rows, "tracked_cpu_percent", "tracked CPU %")
-    plotted |= _plot_metric(axes[1][0], rows, "python_cpu_percent", "Python CPU %")
-    plotted |= _plot_metric(axes[1][0], rows, "daemon_cpu_percent", "daemon CPU %")
-    axes[1][0].set_title("Process CPU Split")
-    axes[1][0].set_ylabel("CPU %")
-
-    rx, ry = _counter_rate(rows, "disk_read_bytes")
-    wx, wy = _counter_rate(rows, "disk_write_bytes")
-    if rx:
-        axes[1][1].plot(rx, [v / (1024 * 1024) for v in ry], linewidth=1.8, label="read")
-        plotted = True
-    if wx:
-        axes[1][1].plot(wx, [v / (1024 * 1024) for v in wy], linewidth=1.8, label="write")
-        plotted = True
-    disk_ax = axes[1][1].twinx()
-    disk_plotted = False
-    disk_plotted |= _plot_metric(disk_ax, rows, "disk_free_bytes", "free", 1024 ** 3)
-    disk_plotted |= _plot_metric(disk_ax, rows, "disk_used_bytes", "used", 1024 ** 3)
-    if disk_plotted:
-        plotted = True
-        disk_ax.set_ylabel("GiB")
-    axes[1][1].set_title("Disk I/O Rate")
-    axes[1][1].set_ylabel("MiB/sec")
+    axes[0].set_title("System CPU")
+    axes[0].set_ylabel("CPU %")
+    axes[1].set_title("Tracked RSS")
+    axes[1].set_ylabel("MiB")
+    axes[2].set_title("Disk Write Rate")
+    axes[2].set_ylabel("MiB/sec")
 
     if not plotted:
         raise ValueError(f"no known system metrics found in {ts_path}")
 
-    for ax in axes.flat:
+    for ax in axes:
         ax.set_xlabel("benchmark time, seconds")
         ax.grid(True, alpha=0.3)
-        _plot_train_events(ax, run_dir)
         handles, _labels = ax.get_legend_handles_labels()
         if handles:
-            ax.legend()
-    handles, _labels = disk_ax.get_legend_handles_labels()
-    if handles:
-        disk_ax.legend(loc="lower right")
-    fig.suptitle("System Resource Timeline", y=0.98)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+            ax.legend(ncols=2, fontsize=8)
+    fig.suptitle("System Resource Timeline by Scenario", y=0.98)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
 
     out = out_path or (run_dir / "system_timeseries.png")
     fig.savefig(out, dpi=160)

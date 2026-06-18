@@ -53,6 +53,7 @@ class DaemonManager:
         log_path: Path | None = None,
         url: str = "http://localhost:51409",
         cache_dir: Path | str | None = None,
+        remote_manifest_url: str | None = None,
         prefetch_concurrency: int | None = None,
         remote_throttle: int | None = None,
     ):
@@ -61,6 +62,7 @@ class DaemonManager:
         self.cwd = cwd
         self.url = url
         self.cache_dir = cache_dir
+        self.remote_manifest_url = remote_manifest_url
         self.prefetch_concurrency = prefetch_concurrency
         self.remote_throttle = remote_throttle
         self._proc: subprocess.Popen | None = None
@@ -82,6 +84,8 @@ class DaemonManager:
         argv = [str(self.binary), "daemon", "--no-mount", "--no-wal", "--root", str(self.root_path)]
         if self.cache_dir is not None:
             argv += ["--cache-dir", str(self.cache_dir)]
+        if self.remote_manifest_url is not None:
+            argv += ["--remote-manifest-url", str(self.remote_manifest_url)]
         if self.prefetch_concurrency is not None:
             argv += ["--prefetch-concurrency", str(self.prefetch_concurrency)]
         if self.remote_throttle is not None and self.remote_throttle > 0:

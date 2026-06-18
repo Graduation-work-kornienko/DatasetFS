@@ -52,6 +52,8 @@ def plot_mutation(run_dir: Path, out_path: Path | None = None) -> Path:
     if not rows:
         raise ValueError(f"no rows in {run_dir / 'summary.csv'}")
 
+    if "vacuum_scenario" in rows[0]:
+        return plot_vacuum_matrix(run_dir, out_path)
     if rows[0].get("scenario") == "image_endurance":
         return plot_image_endurance(run_dir, out_path)
     if rows[0].get("scenario") == "format_mutation":
@@ -82,9 +84,16 @@ def plot_mutation(run_dir: Path, out_path: Path | None = None) -> Path:
 
 def plot_format_mutation(run_dir: Path, out_path: Path | None = None) -> Path:
     rows = _read_rows(run_dir / "summary.csv")
+    selected_changed: set[float] | None = None
+    if "mutation_audio_speech_commands" in run_dir.name:
+        selected_changed = {500, 1000, 2500, 6000, 10000}
+
     grouped: dict[tuple[str, float], list[float]] = defaultdict(list)
     for row in rows:
-        key = (row.get("format", "format"), _f(row, "changed_files"))
+        changed = _f(row, "changed_files")
+        if selected_changed is not None and changed not in selected_changed:
+            continue
+        key = (row.get("format", "format"), changed)
         grouped[key].append(_f(row, "mean_operation_ms"))
 
     series: dict[str, list[tuple[float, float]]] = defaultdict(list)
@@ -92,16 +101,81 @@ def plot_format_mutation(run_dir: Path, out_path: Path | None = None) -> Path:
         series[fmt].append((changed, _mean(values)))
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    for fmt, points in sorted(series.items()):
+    labels = {
+        "datasetfs": "DatasetFS",
+        "datasetfs_tx": "DatasetFS batch",
+        "imagefolder": "ImageFolder",
+        "webdataset": "WebDataset",
+    }
+    order = ["imagefolder", "datasetfs_tx", "datasetfs", "webdataset"]
+    for fmt in [f for f in order if f in series] + sorted(f for f in series if f not in order):
+        points = series[fmt]
         points = sorted(points)
-        ax.plot([p[0] for p in points], [p[1] for p in points], marker="o", linewidth=2, label=fmt)
-    ax.set_xlabel("changed files")
-    ax.set_ylabel("mean operation time, ms")
-    ax.set_title("Random File Replacement Cost Without Training")
+        ax.plot([p[0] for p in points], [p[1] for p in points], marker="o", linewidth=2, label=labels.get(fmt, fmt))
+    ax.set_xlabel("Число изменяемых объектов")
+    ax.set_ylabel("Среднее время изменения, мс/объект")
+    if "mutation_audio_speech_commands" in run_dir.name:
+        ax.set_title("Стоимость изменения объектов")
+        ax.set_xlim(left=0)
+        ax.set_xticks(sorted(selected_changed or []))
+    else:
+        ax.set_title("Стоимость изменения объектов без обучения")
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()
     out = out_path or (run_dir / "mutation_format_compare.png")
+    fig.savefig(out, dpi=160)
+    plt.close(fig)
+    return out
+
+
+def plot_vacuum_matrix(run_dir: Path, out_path: Path | None = None) -> Path:
+    rows = _read_rows(run_dir / "summary.csv")
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        grouped[row.get("vacuum_scenario", "scenario")].append(row)
+
+    preferred = ["binary_wal_no_vacuum", "binary_wal_with_vacuum", "json_wal_no_vacuum", "json_wal_with_vacuum"]
+    scenarios = [s for s in preferred if s in grouped] + sorted(s for s in grouped if s not in preferred)
+
+    def vals(metric: str, scale: float = 1.0) -> list[float]:
+        return [_mean([_f(r, metric) / scale for r in grouped[s] if r.get(metric) != ""]) for s in scenarios]
+
+    throughput = vals("steady_samples_per_second")
+    throughput_by_scenario = dict(zip(scenarios, throughput))
+
+    def baseline_for(scenario: str) -> float:
+        if scenario.startswith("json_") and "json_wal_no_vacuum" in throughput_by_scenario:
+            return throughput_by_scenario["json_wal_no_vacuum"]
+        if "binary_wal_no_vacuum" in throughput_by_scenario:
+            return throughput_by_scenario["binary_wal_no_vacuum"]
+        return max(throughput)
+
+    throughput_delta = [(v / baseline_for(s) - 1.0) * 100.0 if baseline_for(s) else 0.0 for s, v in zip(scenarios, throughput)]
+    disk_write = vals("disk_write_bytes", 1024 * 1024)
+    latency = vals("mutation_latency_mean_ms")
+
+    y = list(range(len(scenarios)))
+    fig, axes = plt.subplots(1, 3, figsize=(14, max(4.5, 0.55 * len(scenarios) + 2.0)), sharey=True)
+    panels = [
+        (axes[0], throughput_delta, "Throughput overhead", "change vs same-WAL/no vacuum, %", "#3a78c0"),
+        (axes[1], disk_write, "Disk writes", "MiB", "#2f855a"),
+        (axes[2], latency, "Mutation latency", "mean ms/op", "#c0563a"),
+    ]
+    for ax, values, title, xlabel, color in panels:
+        bars = ax.barh(y, values, color=color, edgecolor="black", linewidth=0.5)
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+        ax.grid(True, axis="x", alpha=0.3)
+        if title == "Throughput overhead":
+            ax.axvline(0.0, color="black", linewidth=0.8)
+        for bar, value in zip(bars, values):
+            ax.text(value, bar.get_y() + bar.get_height() / 2, f" {value:.1f}", va="center", fontsize=8)
+    axes[0].set_yticks(y)
+    axes[0].set_yticklabels(scenarios)
+    fig.suptitle("Vacuum/Compaction: Cost Summary", y=0.98)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    out = out_path or (run_dir / "vacuum_compaction.png")
     fig.savefig(out, dpi=160)
     plt.close(fig)
     return out

@@ -25,7 +25,7 @@ func parseShardName(name string) (int, bool) {
 }
 
 // cleanupOldShards deletes every shard_* file in root whose id is not in keep,
-// including the old delta shard (id -1). It also sweeps any leftover
+// including old rotated delta shards. It also sweeps any leftover
 // shard_*.tmp staging files.
 func cleanupOldShards(root string, keep map[int]bool) error {
 	entries, err := os.ReadDir(root)

@@ -25,15 +25,19 @@ import (
 //
 // Returns (localRoot=cacheDir, prefetcher). The caller loads the manifest from
 // localRoot for the index, then wires the prefetcher into storage and Start()s it.
-func prefetchRemoteManifest(rs *storage.RemoteStorage, rootURL, cacheDir string, concurrency int) (string, *storage.RemotePrefetcher, error) {
+func prefetchRemoteManifest(rs *storage.RemoteStorage, rootURL, manifestURL, cacheDir string, concurrency int) (string, *storage.RemotePrefetcher, error) {
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return "", nil, err
 	}
 	base := strings.TrimRight(rootURL, "/")
 	ctx := context.Background()
 
-	if err := rs.Fetch(ctx, base+"/metadata.parquet", filepath.Join(cacheDir, "metadata.parquet")); err != nil {
-		return "", nil, fmt.Errorf("no metadata.parquet at %s: %w", base, err)
+	manifestSource := strings.TrimSpace(manifestURL)
+	if manifestSource == "" {
+		manifestSource = base + "/metadata.parquet"
+	}
+	if err := rs.Fetch(ctx, manifestSource, filepath.Join(cacheDir, "metadata.parquet")); err != nil {
+		return "", nil, fmt.Errorf("no metadata.parquet at %s: %w", manifestSource, err)
 	}
 	log.Printf("[prefetch] manifest metadata.parquet")
 

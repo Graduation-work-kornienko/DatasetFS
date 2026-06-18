@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // RemoteStorageInterface defines the interface for remote storage operations
@@ -14,7 +15,7 @@ type RemoteStorageInterface interface {
 
 // IsURL checks if a string is a URL
 func IsURL(s string) bool {
-	return len(s) > 7 && (s[:7] == "http://" || s[:8] == "https://")
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "ydisk://")
 }
 
 /*

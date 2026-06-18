@@ -15,12 +15,13 @@ dataset:
 
 model: simplecnn
 batch_size: 64
-num_workers: 4
+num_workers: 2
 image_size: 96
 
 epochs: 2
 warmup_epochs: 1
 max_batches_per_epoch: 80
+warmup_batches: 10
 
 seeds: [0, 1, 2]
 loaders: [imagefolder, webdataset, datasetfs, huggingface, lmdb, hdf5, tfrecord, ffcv, synthetic]

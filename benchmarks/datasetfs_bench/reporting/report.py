@@ -84,7 +84,7 @@ def _single_run_table(rows: list[dict[str, str]]) -> list[str]:
             name = f"{name}/{row['format']}"
         grouped[name].append(row)
     lines = [
-        "| loader/dataset | rows | samples/s mean | samples/s std | TTFB mean, s | wait mean, % | fwd/bwd mean, % | optimizer mean, % | CPU mean, % | daemon RSS max, MiB |",
+        "| loader/dataset | rows | samples/s mean | samples/s std | TTFB mean, s | steady wait mean, % | fwd/bwd mean, % | optimizer mean, % | CPU mean, % | daemon RSS max, MiB |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name in sorted(grouped):
@@ -92,7 +92,8 @@ def _single_run_table(rows: list[dict[str, str]]) -> list[str]:
         sps_key = "steady_samples_per_second" if any(r.get("steady_samples_per_second") for r in vals) else "samples_per_second"
         sps = [_f(r, sps_key) for r in vals if r.get(sps_key)]
         ttfb = [_f(r, "time_to_first_batch") for r in vals if r.get("time_to_first_batch")]
-        stall = [_f(r, "batch_wait_fraction", _f(r, "stall_fraction")) * 100.0 for r in vals if r.get("batch_wait_fraction") or r.get("stall_fraction")]
+        stall_key = "steady_batch_wait_fraction" if any(r.get("steady_batch_wait_fraction") for r in vals) else "batch_wait_fraction"
+        stall = [_f(r, stall_key, _f(r, "stall_fraction")) * 100.0 for r in vals if r.get(stall_key) or r.get("stall_fraction")]
         fwd_bwd = [_f(r, "forward_backward_fraction") * 100.0 for r in vals if r.get("forward_backward_fraction")]
         opt = [_f(r, "optimizer_fraction") * 100.0 for r in vals if r.get("optimizer_fraction")]
         cpu = [_f(r, "sys_cpu_pct_mean") for r in vals if r.get("sys_cpu_pct_mean")]

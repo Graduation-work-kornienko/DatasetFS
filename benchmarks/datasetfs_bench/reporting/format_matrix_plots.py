@@ -58,7 +58,13 @@ def plot_format_matrix(run_dirs: list[Path], out_path: Path | None = None) -> Pa
     formats = _format_order(run_dirs[0], all_formats)
     datasets = list(per_dataset.keys())
 
-    fig, ax = plt.subplots(figsize=(max(8, 1.1 * len(formats)), 5))
+    fig, (ax, ax_rel) = plt.subplots(
+        2,
+        1,
+        figsize=(max(9, 1.15 * len(formats)), 7.2),
+        height_ratios=[2.0, 1.15],
+        sharex=True,
+    )
     n_groups = len(datasets)
     width = 0.8 / n_groups
     x = range(len(formats))
@@ -76,15 +82,36 @@ def plot_format_matrix(run_dirs: list[Path], out_path: Path | None = None) -> Pa
                 ax.text(bar.get_x() + bar.get_width() / 2, m,
                         f"{m:.0f}\nn={n}", ha="center", va="bottom", fontsize=8)
 
+        best = max([m for m in means if m > 0.0], default=0.0)
+        rel = [((m / best - 1.0) * 100.0) if best else 0.0 for m in means]
+        ax_rel.bar(offs, rel, width=width, label=ds_name, edgecolor="black", linewidth=0.5)
+        for ox, value in zip(offs, rel):
+            if abs(value) >= 0.5 or value == 0.0:
+                ax_rel.text(ox, value, f"{value:.1f}%", ha="center", va="bottom" if value >= 0 else "top", fontsize=7)
+
     ax.set_xticks(list(x))
-    ax.set_xticklabels(formats, rotation=20, ha="right")
+    ax_rel.set_xticks(list(x))
+    ax_rel.set_xticklabels(formats, rotation=20, ha="right")
     ax.set_ylabel("samples / sec")
-    ax.set_title("Throughput by storage format (loader-bound, SimpleCNN)\n"
-                 "mean ± stddev across seeds, steady-state")
+    ax.set_title("Throughput by storage format (steady-state mean ± stddev)")
     ax.grid(axis="y", linestyle=":", alpha=0.5)
     ax.set_axisbelow(True)
+    positive = [per_dataset[ds].get(f, (0.0, 0.0, 0))[0] for ds in datasets for f in formats]
+    positive = [v for v in positive if v > 0.0]
+    if positive:
+        ymin = min(positive) * 0.94
+        ymax = max(positive) * 1.04
+        if ymax > ymin:
+            ax.set_ylim(ymin, ymax)
+            ax.text(0.01, 0.02, "y-axis is zoomed", transform=ax.transAxes, fontsize=8, color="#555")
+    ax_rel.axhline(0.0, color="black", linewidth=0.8)
+    ax_rel.set_ylabel("vs best, %")
+    ax_rel.set_title("Relative gap to the fastest format in each dataset")
+    ax_rel.grid(axis="y", linestyle=":", alpha=0.5)
+    ax_rel.set_axisbelow(True)
     if n_groups > 1:
         ax.legend(title="dataset")
+        ax_rel.legend(title="dataset")
     fig.tight_layout()
 
     if out_path is None:

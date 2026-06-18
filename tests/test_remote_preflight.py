@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from benchmarks.datasetfs_bench.runner.remote_preflight import (
+    datasetfs_total_bytes_from_manifest,
     datasetfs_shard_urls_from_manifest,
     datasetfs_urls,
     validate_config,
@@ -23,6 +24,9 @@ def _cfg():
         "datasetfs_remote": {
             "root_url": "http://example.test/dfs",
             "remote_throttle": 20_971_520,
+        },
+        "remote_limits": {
+            "max_total_bytes": 6 * 1024 * 1024 * 1024,
         },
         "loaders": [
             {"format": "webdataset", "name": "webdataset-remote"},
@@ -63,3 +67,4 @@ def test_remote_preflight_reads_datasetfs_shards_from_parquet_manifest(tmp_path)
         "http://example.test/dfs/shard_1",
         "http://example.test/dfs/shard_2",
     ]
+    assert datasetfs_total_bytes_from_manifest(root / "metadata.parquet") > 0

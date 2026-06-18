@@ -30,6 +30,17 @@ ALL_FORMATS = (
     "lmdb", "hdf5", "tfrecord", "ffcv",
 )
 
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".jpe", ".png"}
+AUDIO_SUFFIXES = {".wav"}
+
+
+def _sample_suffixes(ds: FastaiDataset) -> set[str]:
+    return AUDIO_SUFFIXES if ds.name == "speech_commands" else IMAGE_SUFFIXES
+
+
+def _is_valid_sample_file(path: Path, suffixes: set[str]) -> bool:
+    return path.is_file() and not path.name.startswith("._") and path.suffix.lower() in suffixes
+
 
 def _train_dir(ds: FastaiDataset, extracted: Path) -> Path:
     """Root containing class subdirs. May be extracted/train (split layout)
@@ -49,7 +60,7 @@ def _list_samples(ds: FastaiDataset, train: Path) -> list[tuple[Path, str]]:
         if class_dir.name not in classes:
             continue
         for f in sorted(class_dir.iterdir()):
-            if f.is_file():
+            if _is_valid_sample_file(f, _sample_suffixes(ds)):
                 samples.append((f, class_dir.name))
     return samples
 
@@ -75,7 +86,11 @@ def prepare_imagefolder(ds: FastaiDataset, extracted: Path, out: Path) -> None:
         src = train_root / class_name
         if not src.is_dir():
             raise RuntimeError(f"missing class dir {src} for dataset {ds.name}")
-        os.symlink(src, out / class_name, target_is_directory=True)
+        dst = out / class_name
+        dst.mkdir(parents=True, exist_ok=True)
+        for sample in sorted(src.iterdir()):
+            if _is_valid_sample_file(sample, _sample_suffixes(ds)):
+                os.symlink(sample, dst / sample.name)
 
     marker.touch()
     print(f"[done] {ds.name}/imagefolder ({len(ds.classes)} class symlinks → {train_root})", flush=True)

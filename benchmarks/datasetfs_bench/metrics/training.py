@@ -40,6 +40,13 @@ class EpochStats:
     # historically fell outside it. (Diagnosed 2026-06-03 via profiling/ttfb_probe.py.)
     steady_n_samples: int = 0
     steady_wall_seconds: float = 0.0
+    warmup_batches: int = 0
+
+    def _steady_fetch_seconds(self) -> list[float]:
+        return self.fetch_latency_seconds[self.warmup_batches:]
+
+    def _steady_compute_seconds(self) -> list[float]:
+        return self.compute_seconds[self.warmup_batches:]
 
     @property
     def samples_per_second(self) -> float:
@@ -65,6 +72,13 @@ class EpochStats:
     @property
     def batch_wait_fraction(self) -> float:
         return self.stall_fraction
+
+    @property
+    def steady_batch_wait_fraction(self) -> float:
+        total_fetch = sum(self._steady_fetch_seconds())
+        total_compute = sum(self._steady_compute_seconds())
+        denom = total_fetch + total_compute
+        return total_fetch / denom if denom > 0 else 0.0
 
 
     @property
@@ -100,10 +114,13 @@ class EpochStats:
             "compute_p50": _percentile(self.compute_seconds, 50),
             "batch_wait_total_s": sum(self.fetch_latency_seconds),
             "compute_total_s": sum(self.compute_seconds),
+            "steady_batch_wait_total_s": sum(self._steady_fetch_seconds()),
+            "steady_compute_total_s": sum(self._steady_compute_seconds()),
             "zero_grad_total_s": sum(self.zero_grad_seconds),
             "forward_backward_total_s": sum(self.forward_backward_seconds),
             "optimizer_step_total_s": sum(self.optimizer_step_seconds),
             "batch_wait_fraction": self.batch_wait_fraction,
+            "steady_batch_wait_fraction": self.steady_batch_wait_fraction,
             "forward_backward_fraction": self.forward_backward_fraction,
             "optimizer_fraction": self.optimizer_fraction,
             "zero_grad_p50": _percentile(self.zero_grad_seconds, 50),

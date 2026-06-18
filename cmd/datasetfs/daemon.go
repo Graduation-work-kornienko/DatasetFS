@@ -31,6 +31,7 @@ func newDaemonCmd() *cobra.Command {
 		mutexProfileRate    int
 		blockProfileRate    int
 		cacheDir            string
+		remoteManifestURL   string
 		prefetchConcurrency int
 		remoteThrottle      int64
 		walFormat           string
@@ -69,7 +70,7 @@ func newDaemonCmd() *cobra.Command {
 			var prefetcher *storage.RemotePrefetcher
 			var err error
 			if remoteStorage != nil {
-				localRoot, prefetcher, err = prefetchRemoteManifest(remoteStorage, rootPath, cacheDir, prefetchConcurrency)
+				localRoot, prefetcher, err = prefetchRemoteManifest(remoteStorage, rootPath, remoteManifestURL, cacheDir, prefetchConcurrency)
 				if err != nil {
 					return fmt.Errorf("prefetch remote manifest: %w", err)
 				}
@@ -141,8 +142,10 @@ func newDaemonCmd() *cobra.Command {
 				c := make(chan os.Signal, 1)
 				signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 				<-c
-				log.Println("Saving manifest")
-				mutMgr.Shutdown()
+				if wal != nil {
+					log.Println("Saving manifest")
+					mutMgr.Shutdown()
+				}
 				if wal != nil {
 					if cerr := wal.Close(); cerr != nil {
 						log.Printf("wal.Close: %v", cerr)
@@ -191,8 +194,10 @@ func newDaemonCmd() *cobra.Command {
 			log.Printf("Successfully mounted DatasetFS %s", mountPoint)
 			server.Wait()
 
-			log.Println("Saving manifest")
-			mutMgr.Shutdown()
+			if wal != nil {
+				log.Println("Saving manifest")
+				mutMgr.Shutdown()
+			}
 			if wal != nil {
 				if cerr := wal.Close(); cerr != nil {
 					log.Printf("wal.Close: %v", cerr)
@@ -209,6 +214,7 @@ func newDaemonCmd() *cobra.Command {
 	cmd.Flags().IntVar(&mutexProfileRate, "mutex-profile-rate", 0, "If >0, enables /debug/pprof/mutex with 1-in-N sampling. Adds ~1-3% overhead.")
 	cmd.Flags().IntVar(&blockProfileRate, "block-profile-rate", 0, "If >0, enables /debug/pprof/block with rate in ns. 1 means every blocking event.")
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", "./dataset_cache", "Directory for caching remote datasets")
+	cmd.Flags().StringVar(&remoteManifestURL, "remote-manifest-url", "", "Optional manifest URL for remote datasets; shards still use --root")
 	cmd.Flags().IntVar(&prefetchConcurrency, "prefetch-concurrency", 4, "Background download workers for remote streaming (overlap with training)")
 	cmd.Flags().Int64Var(&remoteThrottle, "remote-throttle", 0, "Limit aggregate remote download bandwidth in bytes/sec (0 = unlimited)")
 	cmd.Flags().StringVar(&walFormat, "wal-format", "binary", "Format for WAL (supported: json and binary)")

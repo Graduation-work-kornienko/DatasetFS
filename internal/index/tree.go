@@ -10,11 +10,13 @@ import (
 type ShardType string
 
 const (
-	Base ShardType = "base"
+	Base  ShardType = "base"
+	Delta ShardType = "delta"
 )
 
-// DeltaShardID is the reserved shard number for the append-only delta shard that
-// receives mutations (added files) before vacuum folds them into base shards.
+// DeltaShardID is the first reserved shard number for append-only delta shards.
+// Additional delta shards use decreasing negative IDs (-2, -3, ...), so they
+// can rotate when the current delta reaches the target shard size.
 const DeltaShardID = -1
 
 type Shard struct {

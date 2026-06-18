@@ -88,6 +88,21 @@ def _plot_rates(ax, grouped: dict[str, list[dict]], metric: str, title: str, yla
     return plotted
 
 
+def _plot_rate_mib(ax, grouped: dict[str, list[dict]], metric: str, title: str) -> bool:
+    plotted = False
+    for name, rows in grouped.items():
+        xs, ys = _counter_rate(rows, metric)
+        if not xs:
+            continue
+        ax.plot(xs, [v / (1024 * 1024) for v in ys], linewidth=1.8, label=name)
+        plotted = True
+    ax.set_title(title)
+    ax.set_xlabel("benchmark time, seconds")
+    ax.set_ylabel("MiB/sec")
+    ax.grid(True, alpha=0.3)
+    return plotted
+
+
 def plot_daemon_timeseries(run_dir: Path, out_path: Path | None = None) -> Path:
     ts_path = run_dir / "daemon_timeseries.csv"
     if not ts_path.exists():
@@ -97,26 +112,45 @@ def plot_daemon_timeseries(run_dir: Path, out_path: Path | None = None) -> Path:
         raise ValueError(f"no rows in {ts_path}")
     grouped = _group_rows(rows)
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 8))
-    plotted = [
-        _plot_lines(axes[0][0], grouped, "gauge_active_pipelines", "Active Pipelines", "count"),
-        _plot_rates(axes[0][1], grouped, "counter_load_requests_total", "Load Requests", "requests/sec"),
-        _plot_rates(axes[1][0], grouped, "counter_shm_write_bytes_total", "SHM Write Throughput", "bytes/sec"),
-        _plot_lines(axes[1][1], grouped, "hist_load_latency_p95_seconds", "Load Latency p95", "seconds"),
+    panels = [
+        ("line", "gauge_remote_shards_pending", "Remote Shards Pending", "count"),
+        ("rate_mib", "counter_remote_bytes_downloaded_total", "Remote Download Throughput", "MiB/sec"),
+        ("rate", "counter_remote_cache_hits_total", "Remote Cache Hits", "hits/sec"),
+        ("rate", "counter_remote_cache_misses_total", "Remote Cache Misses", "misses/sec"),
+        ("line", "hist_remote_shard_wait_latency_p95_seconds", "Remote Shard Wait p95", "seconds"),
+        ("rate_mib", "counter_shm_write_bytes_total", "SHM Write Throughput", "MiB/sec"),
     ]
+    selected: list[tuple[str, str, str, str]] = []
+    for kind, metric, title, ylabel in panels:
+        has_values = any(row.get(metric, "") not in ("", "0", "0.0") for rows_for_name in grouped.values() for row in rows_for_name)
+        if has_values:
+            selected.append((kind, metric, title, ylabel))
+    if not selected:
+        selected = [("line", "gauge_active_pipelines", "Active Pipelines", "count")]
+
+    fig, axes = plt.subplots(len(selected), 1, figsize=(13, max(4.5, 2.6 * len(selected))), squeeze=False, sharex=False)
+    plotted = []
+    for ax, (kind, metric, title, ylabel) in zip(axes[:, 0], selected):
+        if kind == "rate":
+            plotted.append(_plot_rates(ax, grouped, metric, title, ylabel))
+        elif kind == "rate_mib":
+            plotted.append(_plot_rate_mib(ax, grouped, metric, title))
+        else:
+            plotted.append(_plot_lines(ax, grouped, metric, title, ylabel))
     if not any(plotted):
         raise ValueError(f"no known daemon metrics found in {ts_path}")
 
-    handles, labels = axes[0][0].get_legend_handles_labels()
+    axes_flat = list(axes[:, 0])
+    handles, labels = axes_flat[0].get_legend_handles_labels()
     if not handles:
-        for ax in axes.flat:
+        for ax in axes_flat:
             handles, labels = ax.get_legend_handles_labels()
             if handles:
                 break
     if handles:
         fig.legend(handles, labels, loc="upper center", ncols=min(3, len(labels)))
     fig.suptitle("DatasetFS Daemon Metrics Timeline", y=0.98)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
 
     out = out_path or (run_dir / "daemon_timeseries.png")
     fig.savefig(out, dpi=160)

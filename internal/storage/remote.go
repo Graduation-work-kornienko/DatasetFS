@@ -2,11 +2,14 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	internalio "github.com/Graduation-work-kornienko/DatasetFS/internal/io"
@@ -42,6 +45,44 @@ func (rs *RemoteStorage) limitedBody(r io.Reader) io.Reader {
 	return internalio.NewLimitedReader(r, rs.limiter)
 }
 
+func (rs *RemoteStorage) resolveURL(ctx context.Context, raw string) (string, error) {
+	if !strings.HasPrefix(raw, "ydisk://") {
+		return raw, nil
+	}
+	token := strings.TrimSpace(os.Getenv("YADISK_TOKEN"))
+	if token == "" {
+		return "", fmt.Errorf("YADISK_TOKEN is not set")
+	}
+	path := strings.TrimPrefix(raw, "ydisk://")
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	apiURL := "https://cloud-api.yandex.net/v1/disk/resources/download?path=" + url.QueryEscape(path)
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "OAuth "+token)
+	resp, err := rs.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Yandex.Disk download link status %d", resp.StatusCode)
+	}
+	var payload struct {
+		Href string `json:"href"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", err
+	}
+	if payload.Href == "" {
+		return "", fmt.Errorf("Yandex.Disk response missing href")
+	}
+	return payload.Href, nil
+}
+
 // Download downloads a file from a URL and returns the local path
 func (rs *RemoteStorage) Download(ctx context.Context, url string) (string, error) {
 	rs.mu.Lock()
@@ -64,8 +105,13 @@ func (rs *RemoteStorage) Download(ctx context.Context, url string) (string, erro
 	}
 	defer tmpFile.Close()
 
+	resolvedURL, err := rs.resolveURL(ctx, url)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", url, err)
+	}
+
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", resolvedURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -127,7 +173,11 @@ func (rs *RemoteStorage) Fetch(ctx context.Context, url, dst string) error {
 		return fmt.Errorf("create dst dir: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resolvedURL, err := rs.resolveURL(ctx, url)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", url, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", resolvedURL, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -192,7 +242,7 @@ func (rs *RemoteStorage) GetLocalPath(ctx context.Context, url string) (string, 
 
 // isURL checks if a string is a URL
 func isURL(s string) bool {
-	return len(s) > 7 && (s[:7] == "http://" || s[:8] == "https://")
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "ydisk://")
 }
 
 // IsURL checks if a string is a URL (public function)
@@ -219,8 +269,13 @@ func (rs *RemoteStorage) DownloadStream(ctx context.Context, url string) (*http.
 		}, nil
 	}
 
+	resolvedURL, err := rs.resolveURL(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", url, err)
+	}
+
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", resolvedURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

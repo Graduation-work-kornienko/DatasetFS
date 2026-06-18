@@ -1,0 +1,60 @@
+# Remote cached comparison (DatasetFS HTTP remote vs WebDataset HTTP with local cache).
+#
+# This variant is intended for the fair repeated-epoch benchmark: both DatasetFS
+# and WebDataset start each seed with an empty local cache, then keep that cache
+# across epochs. Epoch 0 therefore measures cold remote fill, while epoch 1
+# measures reuse from the local persistent cache.
+#
+# Expected staged layout (created by scripts.bench.stage_remote_publaynet_subset):
+#   runs/remote_stage/publaynet/datasetfs   (metadata.parquet + selected shards)
+#   runs/remote_stage/publaynet/webdataset  (selected shard-*.tar)
+
+remote_limits:
+  max_total_bytes: 6442450944
+
+dataset:
+  name: publaynet_remote_subset
+  imagefolder: runs/remote_stage/publaynet/imagefolder
+  webdataset: runs/remote_stage/publaynet/webdataset
+  datasetfs: runs/remote_stage/publaynet/datasetfs
+  webdataset_remote:
+    ydisk_remote_root: datasetfs-bench/formats/publaynet/webdataset
+    num_shards: 12
+    shard_pattern: shard-{i:06d}.tar
+    wds_http_mode: curl
+    wds_curl_limit_rate: 20m
+
+datasetfs_remote:
+  root_url: ydisk://datasetfs-bench/formats/publaynet/datasetfs
+  manifest_url: ydisk://datasetfs-bench/remote_subsets/publaynet_6g/datasetfs/metadata.parquet
+  cache_dir: runs/remote_cache/datasetfs
+  prefetch_concurrency: 2
+  remote_throttle: 20971520
+
+model: simplecnn
+batch_size: 64
+num_workers: 2
+image_size: 96
+
+epochs: 2
+warmup_epochs: 1
+max_batches_per_epoch: 80
+warmup_batches: 5
+dfs_timeout_seconds: 600
+
+seeds: [0, 1, 2]
+
+loaders:
+  - format: webdataset
+    name: webdataset-remote-cache
+    wds_cache_dir: runs/remote_cache/webdataset
+    # -1 means unlimited in WebDataset 1.0.2; remote_limits bounds the staged data.
+    wds_cache_size: -1
+  - format: datasetfs
+    name: datasetfs-remote
+
+reset_remote_caches_before_seed: true
+drop_page_cache_between_cells: false
+daemon_metrics_interval_s: 0.5
+
+daemon_binary: bin/datasetfs

@@ -7,6 +7,7 @@ multimodal samples. Produces per-epoch EpochStats.
 from __future__ import annotations
 
 import time
+import gc
 from typing import Callable
 
 import torch
@@ -40,6 +41,7 @@ def train_one_epoch(
     max_batches: int | None = None,
     warmup_batches: int = 0,
     after_first_batch: Callable[[], None] | None = None,
+    batch_delay_s: float = 0.0,
 ) -> EpochStats:
     """Train for one epoch, returning timing stats.
 
@@ -92,6 +94,8 @@ def train_one_epoch(
         t_stage = time.perf_counter()
         optim.step()
         optimizer_step_times.append(time.perf_counter() - t_stage)
+        if batch_delay_s > 0:
+            time.sleep(batch_delay_s)
         compute_times.append(time.perf_counter() - t_compute_start)
 
         losses.append(float(loss.item()))
@@ -104,6 +108,13 @@ def train_one_epoch(
         if max_batches is not None and n_batches >= max_batches:
             break
 
+    fetch_latencies = timed.fetch_latencies
+    shutdown = getattr(it, "_shutdown_workers", None)
+    if callable(shutdown):
+        shutdown()
+    del timed, it
+    gc.collect()
+
     t_end = time.perf_counter()
     wall = t_end - t_start
     steady_wall = (t_end - t_steady_start) if t_steady_start is not None else 0.0
@@ -114,11 +125,12 @@ def train_one_epoch(
         n_samples=n_samples,
         wall_seconds=wall,
         time_to_first_batch=time_to_first or 0.0,
-        fetch_latency_seconds=timed.fetch_latencies,
+        fetch_latency_seconds=fetch_latencies,
         compute_seconds=compute_times,
         zero_grad_seconds=zero_grad_times,
         forward_backward_seconds=forward_backward_times,
         optimizer_step_seconds=optimizer_step_times,
         steady_n_samples=steady_n_samples,
         steady_wall_seconds=steady_wall,
+        warmup_batches=warmup_batches,
     )

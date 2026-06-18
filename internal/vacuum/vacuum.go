@@ -167,7 +167,8 @@ func Run(opts Options) (Stats, error) {
 		return stats, fmt.Errorf("swap into place: %w", err)
 	}
 
-	// Remove shards that the new manifest no longer references (incl. delta -1).
+	// Remove shards that the new manifest no longer references, including old
+	// rotated delta shards.
 	if err := cleanupOldShards(opts.Root, res.keepIDs()); err != nil {
 		return stats, fmt.Errorf("cleanup old shards: %w", err)
 	}

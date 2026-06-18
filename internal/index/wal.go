@@ -71,6 +71,12 @@ type WAL interface {
 	Close() error
 }
 
+// BatchWAL is an optional extension for group-committing multiple WAL records
+// with one fsync. Implementations must preserve the order of entries.
+type BatchWAL interface {
+	LogBatch(entries []*WALEntry) error
+}
+
 // JSONWAL is the JSON-based WAL implementation.
 type JSONWAL struct {
 	mu   sync.Mutex
@@ -128,6 +134,16 @@ func (w *JSONWAL) writeEntry(e *WALEntry) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	if err := w.writeEntryLocked(e); err != nil {
+		return err
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync wal: %w", err)
+	}
+	return nil
+}
+
+func (w *JSONWAL) writeEntryLocked(e *WALEntry) error {
 	if w.file == nil {
 		return fmt.Errorf("wal closed")
 	}
@@ -142,11 +158,20 @@ func (w *JSONWAL) writeEntry(e *WALEntry) error {
 	if _, err := w.file.Write(data); err != nil {
 		return fmt.Errorf("write wal entry: %w", err)
 	}
-	// fsync makes the durability guarantee real. Without this, a kernel
-	// crash within ~30 s of the write loses the record even though Write
-	// returned success.
+	return nil
+}
+
+func (w *JSONWAL) LogBatch(entries []*WALEntry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for _, entry := range entries {
+		if err := w.writeEntryLocked(entry); err != nil {
+			return err
+		}
+	}
 	if err := w.file.Sync(); err != nil {
-		return fmt.Errorf("sync wal: %w", err)
+		return fmt.Errorf("sync wal batch: %w", err)
 	}
 	return nil
 }
@@ -209,7 +234,7 @@ func (w *JSONWAL) Replay(idx *CoreIndex) (applied int, err error) {
 		if jerr := json.Unmarshal(line, &e); jerr != nil {
 			return applied, fmt.Errorf("wal replay: malformed entry at record %d: %w", applied+1, jerr)
 		}
-		if aerr := applyEntry(&e, idx); aerr != nil {
+		if aerr := applyEntryWithRoot(&e, idx, filepath.Dir(w.path)); aerr != nil {
 			return applied, fmt.Errorf("wal replay: apply entry %d (op=%s): %w", applied+1, e.Op, aerr)
 		}
 		applied++
@@ -223,10 +248,19 @@ func (w *JSONWAL) Replay(idx *CoreIndex) (applied int, err error) {
 // applyEntry dispatches a single WAL record to the right CoreIndex method.
 // Kept package-private; clients use Replay.
 func applyEntry(e *WALEntry, idx *CoreIndex) error {
+	return applyEntryWithRoot(e, idx, "")
+}
+
+func applyEntryWithRoot(e *WALEntry, idx *CoreIndex, root string) error {
 	switch e.Op {
 	case OpAdd:
 		if e.Add == nil {
 			return fmt.Errorf("op=add but Add field is nil")
+		}
+		if root != "" && hasDurableManifest(root) && !addPayloadPresent(root, e.Add) {
+			// The WAL entry was fsynced before the delta bytes were fully appended.
+			// Skipping keeps recovery from publishing an object with missing payload.
+			return nil
 		}
 		return idx.AddFile(e.Add)
 	case OpDelete:
@@ -245,6 +279,23 @@ func applyEntry(e *WALEntry, idx *CoreIndex) error {
 	default:
 		return fmt.Errorf("unknown op: %q", e.Op)
 	}
+}
+
+func hasDurableManifest(root string) bool {
+	_, err := os.Stat(filepath.Join(root, manifestParquetFileName))
+	return err == nil
+}
+
+func addPayloadPresent(root string, meta *Metadata) bool {
+	if meta == nil || meta.Size < 0 || meta.Offset < 0 {
+		return false
+	}
+	path := filepath.Join(root, fmt.Sprintf("shard_%d", meta.ShardID))
+	st, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return st.Size() >= meta.Offset+meta.Size
 }
 
 // Truncate empties the WAL. Call ONLY after the manifest has been durably

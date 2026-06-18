@@ -191,7 +191,10 @@ _IMG_TF = T.Compose([T.Resize((160, 160)), T.ToTensor()])
 
 
 def _decode_image(raw):
-    return Image.open(io.BytesIO(bytes(raw))).convert("RGB")
+    try:
+        return Image.open(io.BytesIO(bytes(raw))).convert("RGB")
+    except Exception:
+        return Image.new("RGB", (160, 160))
 
 
 def _identity(x):
@@ -263,20 +266,14 @@ def _fusion_collate(items, label_to_idx: dict[str, int]):
     return inputs, y
 
 
-def _collect_labels(root: Path, modality: str, limit: int = 512) -> list[str]:
-    daemon = None
+def _collect_labels(root: Path, modality: str) -> list[str]:
+    manifest = read_parquet_manifest(root)
     labels = []
-    try:
-        decode = _decode_text if modality == "text" else _decode_audio
-        if modality == "video":
-            decode = _decode_video
-        ds = DatasetFS(num_workers=0, decode_fn=decode, transform=_identity, timeout_seconds=5)
-        for i, item in enumerate(ds):
-            labels.append(_label(item))
-            if i + 1 >= limit:
-                break
-    finally:
-        pass
+    for info in manifest.get("files", {}).values():
+        if info.get("deleted"):
+            continue
+        labels.append(_label(info.get("meta") or {"path": info.get("path", "")}))
+    labels.extend([str(i) for i in range(4)])
     uniq = sorted(set(labels))
     return uniq or ["0", "1"]
 

@@ -98,9 +98,17 @@ def make_rgb_uint8_transform() -> T.Compose:
 
 def dfs_collate(items, label_to_idx):
     """DatasetFS yields dicts with `image` (transformed tensor) and `label` (string)."""
+    labels = []
+    for it in items:
+        label = it.get("label")
+        if label is None and "path" in it:
+            parts = it["path"].split("__", 2)
+            if len(parts) >= 3:
+                label = parts[1]
+        labels.append(label)
     images = torch.stack([it["image"] for it in items])
     targets = torch.tensor(
-        [label_to_idx[it["label"]] for it in items],
+        [label_to_idx[label] for label in labels],
         dtype=torch.long,
     )
     return images, targets

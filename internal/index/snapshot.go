@@ -36,9 +36,9 @@ func (i *CoreIndex) bumpGen() {
 }
 
 // materializeLocked builds an immutable Snapshot of the current state. Caller
-// holds i.Mu. The delta shard (DeltaShardID) has no manifest TotalSize — its
-// on-disk tar grows by append — so we derive the covering size from the objects
-// themselves (max Offset+Size). This is also what makes the delta shard correct
+// holds i.Mu. Delta shards may have no reliable manifest TotalSize — their
+// on-disk tar files grow by append — so we derive the covering size from the objects
+// themselves (max Offset+Size). This is also what makes delta shards correct
 // after a WAL replay, which never records a shard size.
 func (i *CoreIndex) materializeLocked() *Snapshot {
 	snap := &Snapshot{Gen: i.gen, Shards: make(map[int]*ShardSnap, len(i.ShardMap))}
@@ -54,7 +54,7 @@ func (i *CoreIndex) materializeLocked() *Snapshot {
 				cover = end
 			}
 		}
-		if id == DeltaShardID {
+		if sh.Type == Delta || id < 0 {
 			ss.TotalSize = cover
 		}
 		snap.Shards[id] = ss

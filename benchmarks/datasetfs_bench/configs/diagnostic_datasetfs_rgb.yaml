@@ -1,0 +1,25 @@
+dataset:
+  name: imagenette
+  imagefolder: data/formats/imagenette/imagefolder
+  datasetfs: data/formats/imagenette/datasetfs
+
+model: simplecnn
+batch_size: 64
+num_workers: 4
+image_size: 96
+
+epochs: 1
+warmup_epochs: 0
+max_batches_per_epoch: 40
+warmup_batches: 5
+seeds: [0]
+
+loaders:
+  - datasetfs
+  - {format: datasetfs, name: datasetfs-rgb-p1, dfs_decode_mode: rgb_uint8, dfs_decode_parallelism: 1}
+  - {format: datasetfs, name: datasetfs-rgb-p2, dfs_decode_mode: rgb_uint8, dfs_decode_parallelism: 2}
+  - {format: datasetfs, name: datasetfs-rgb-p3, dfs_decode_mode: rgb_uint8, dfs_decode_parallelism: 3}
+  - {format: datasetfs, name: datasetfs-rgb-p6, dfs_decode_mode: rgb_uint8, dfs_decode_parallelism: 6}
+
+drop_page_cache_between_cells: false
+daemon_binary: bin/datasetfs

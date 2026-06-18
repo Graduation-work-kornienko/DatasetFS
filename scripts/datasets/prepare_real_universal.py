@@ -361,7 +361,7 @@ def prepare_ucf101_subset(target_gb: float) -> None:
         tmp = raw / "extracting"
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(archive, "r:gz") as tf:
+        with tarfile.open(archive, "r:*") as tf:
             tf.extractall(tmp, filter="data")
         tmp.replace(extracted)
 

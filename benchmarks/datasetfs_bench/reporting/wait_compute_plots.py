@@ -30,6 +30,9 @@ def _label(row: dict) -> str:
 
 
 def _stage_values(row: dict) -> dict[str, float] | None:
+    if row.get("steady_batch_wait_fraction"):
+        wait = _f(row, "steady_batch_wait_fraction")
+        return {"wait": wait, "compute": max(0.0, 1.0 - wait)}
     if not (row.get("batch_wait_fraction") or row.get("stall_fraction")):
         return None
     wait = _f(row, "batch_wait_fraction", _f(row, "stall_fraction"))
@@ -68,35 +71,28 @@ def plot_wait_compute(run_dir: Path, out_path: Path | None = None) -> Path:
     if not agg:
         raise ValueError(f"no wait/compute timing columns in {summary}")
 
-    labels = sorted(agg)
-    detailed = any("forward_backward" in stages or "optimizer" in stages for stages in agg.values())
-    if detailed:
-        stages = [
-            ("wait", "Data wait", "#3a78c0"),
-            ("forward_backward", "Forward+backward", "#c0563a"),
-            ("optimizer", "Optimizer", "#6a4c93"),
-            ("other_compute", "Other compute", "#999999"),
-        ]
-    else:
-        stages = [
-            ("wait", "Data wait", "#3a78c0"),
-            ("compute", "Compute", "#c0563a"),
-        ]
+    labels = sorted(agg, key=lambda label: agg[label].get("wait", 0.0))
 
     height = max(4.5, min(10.0, 0.45 * len(labels) + 2.0))
     fig, ax = plt.subplots(figsize=(10, height))
     ys = list(range(len(labels)))
-    left = [0.0 for _ in labels]
-    for key, title, color in stages:
-        vals = [agg[label].get(key, 0.0) * 100.0 for label in labels]
-        ax.barh(ys, vals, left=left, label=title, color=color, edgecolor="black", linewidth=0.35)
-        left = [l + v for l, v in zip(left, vals)]
+    vals = [agg[label].get("wait", 0.0) * 100.0 for label in labels]
+    bars = ax.barh(ys, vals, color="#3a78c0", edgecolor="black", linewidth=0.35)
+    for bar, value in zip(bars, vals):
+        ax.text(
+            value,
+            bar.get_y() + bar.get_height() / 2,
+            f" {value:.2f}%",
+            va="center",
+            ha="left",
+            fontsize=8,
+        )
 
     ax.set_yticks(ys, labels)
-    ax.set_xlabel("share of batch cycle, %")
-    ax.set_title("Data Wait vs Compute Breakdown")
+    ax.set_xlabel("data wait share of steady batch cycle, %")
+    ax.set_title("Loader Wait Fraction (zoomed; compute is the remaining share)")
     ax.grid(axis="x", linestyle=":", alpha=0.35)
-    ax.legend(loc="lower right")
+    ax.set_xlim(0.0, max(vals) * 1.18 if vals else 1.0)
     fig.tight_layout()
     out = out_path or (run_dir / "wait_compute_breakdown.png")
     fig.savefig(out, dpi=150)

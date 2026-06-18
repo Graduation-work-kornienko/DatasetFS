@@ -136,12 +136,10 @@ func DealerWorker(
 			return
 		case slotMeta, ok := <-metaIn:
 			if !ok {
-				log.Printf("[Dealer] Канал закрыт, эпоха завершена")
 				emit(nil) // empty frame = end of epoch
 				metrics.EpochsCompletedTotal.Add(1)
 				return
 			}
-			log.Printf("[Dealer] Пришел слот %d", slotMeta.SlotID)
 			shadowPool = append(shadowPool, slotMeta.Objects...)
 			allocator.SetRefCount(slotMeta.SlotID, int32(len(slotMeta.Objects)))
 		}
@@ -156,15 +154,12 @@ func DealerWorker(
 					isEOF = true
 					break drain
 				}
-				log.Printf("[Dealer] Дренировали слот %d", slotMeta.SlotID)
 				shadowPool = append(shadowPool, slotMeta.Objects...)
 				allocator.SetRefCount(slotMeta.SlotID, int32(len(slotMeta.Objects)))
 			default:
 				break drain
 			}
 		}
-
-		log.Printf("[Dealer] ✅ Окно размера %d (eof=%v)", len(shadowPool), isEOF)
 
 		shufflePool(rng, shadowPool)
 
@@ -183,7 +178,6 @@ func DealerWorker(
 		}
 
 		if isEOF {
-			log.Printf("[Dealer] Отправили команду окончания")
 			emit(nil) // empty frame = end of epoch
 			metrics.EpochsCompletedTotal.Add(1)
 			return

@@ -165,7 +165,7 @@ class DatasetFS(IterableDataset):
         resp = requests.post(
             f"{daemon_url}/initialize_loading",
             json=payload,
-            timeout=10,
+            timeout=timeout_seconds,
         )
         resp.raise_for_status()
         # Verify the daemon agreed to the mode we asked for; otherwise a stale
@@ -211,8 +211,6 @@ class DatasetFS(IterableDataset):
         worker_id = worker_info.id if worker_info is not None else 0
         pipe_path = self.pipe_path_template.format(worker_id=worker_id)
 
-        print(f"[Python worker={worker_id}] Подключение к DatasetFS pipe={pipe_path}")
-
         with open(self.shm_data_path, "r+b") as data_f, \
              open(self.shm_refs_path, "r+b") as refs_f:
 
@@ -223,14 +221,11 @@ class DatasetFS(IterableDataset):
             # before close (close() raises if any export is still live).
             data_view = memoryview(data_mmap)
 
-            print(f"[Python worker={worker_id}] Ожидание Pipe {pipe_path}")
-
             # Binary pipe (opt 03): readline() can't frame binary, so we read the
             # raw fd with os.read + exact-length reads. O_RDONLY on a FIFO blocks
             # until the daemon's dealer opens the write end — same rendezvous as
             # the old open(pipe_path, "r").
             fd = os.open(pipe_path, os.O_RDONLY)
-            print(f"[Python worker={worker_id}] Pipe подключен")
             decoded = view = None
             try:
                 while True:
@@ -285,6 +280,7 @@ class DatasetFS(IterableDataset):
                     # slot leak). One decrement per slot after the frame loop.
                     consumed = {}
 
+                    owned_items = []
                     for i in range(item_count):
                         slot_id = int(slots[i])
                         consumed[slot_id] = consumed.get(slot_id, 0) + 1
@@ -303,27 +299,31 @@ class DatasetFS(IterableDataset):
                             meta = json.loads(body[cursor:cursor + ml])
                         cursor += ml
 
-                        # Zero-copy slice into the slot buffer, handed to decode
-                        # without the old bytes() copy. The slice MUST be released
-                        # before we yield: a generator paused at yield that is then
-                        # abandoned (GeneratorExit) would otherwise leave a live
-                        # export, and mmap.close() raises while any export is alive.
-                        # Decode/transform materialize owned objects, so releasing
-                        # the view here is safe (the slot itself can't recycle until
-                        # the per-slot decrement after this frame's loop).
                         view = data_view[offset:offset + size]
+                        raw = bytes(view)
+                        view.release()
+                        view = None
+
+                        owned_items.append((raw, size, path, meta))
+
+                    for slot_id, cnt in consumed.items():
+                        self._decrement_refcount_by(refs_mmap, slot_id, cnt)
+
+                    for raw, size, path, meta in owned_items:
                         decoded = None
                         if self.decode_mode == DECODE_RGB_UINT8:
                             # Daemon already JPEG-decoded + resized; slot bytes
-                            # are a packed (H, W, 3) uint8 HWC tensor. frombuffer
-                            # aliases the mmap (truly zero-copy now); ToTensor
-                            # materializes an owned float tensor.
+                            # are a packed (H, W, 3) uint8 HWC tensor. NumPy marks
+                            # mmap-backed frombuffer views as read-only; make the
+                            # ownership boundary explicit before torchvision's
+                            # ToTensor to avoid read-only tensor warnings and noisy
+                            # first-batch timing.
                             h = w = self.decode_image_size
                             if size == h * w * 3:
-                                decoded = np.frombuffer(view, dtype=np.uint8).reshape(h, w, 3)
+                                decoded = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3).copy()
                             # else: daemon misconfig / mode mismatch → skip below
                         else:
-                            decoded = self.decode_fn(view)
+                            decoded = self.decode_fn(raw)
 
                         tensor = None
                         if decoded is not None:
@@ -332,15 +332,12 @@ class DatasetFS(IterableDataset):
                             except Exception:
                                 tensor = None  # transform failure: skip, keep going
 
-                        # Drop any slot-aliasing array (rgb frombuffer view), then
-                        # release the slice — before yield, before any continue.
+                        # Drop any slot-aliasing array (rgb frombuffer view) before
+                        # yielding to keep mmap lifetimes independent of consumers.
                         decoded = None
-                        view.release()
-                        view = None
 
                         if tensor is None:
-                            # decoder signaled skip (None), size mismatch, or
-                            # transform failure — already counted in `consumed`.
+                            # decoder signaled skip (None), size mismatch, or transform failure.
                             continue
 
                         result = {"image": tensor, "dfs_generation": generation}
@@ -355,9 +352,6 @@ class DatasetFS(IterableDataset):
                                 result["meta_raw"] = meta
 
                         yield result
-
-                    for slot_id, cnt in consumed.items():
-                        self._decrement_refcount_by(refs_mmap, slot_id, cnt)
             finally:
                 os.close(fd)
                 # Drop any mmap-aliasing locals before releasing the view, else

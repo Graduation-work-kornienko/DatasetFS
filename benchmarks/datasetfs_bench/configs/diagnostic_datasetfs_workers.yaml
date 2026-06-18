@@ -1,0 +1,24 @@
+dataset:
+  name: imagenette
+  imagefolder: data/formats/imagenette/imagefolder
+  datasetfs: data/formats/imagenette/datasetfs
+
+model: simplecnn
+batch_size: 64
+num_workers: 4
+image_size: 96
+
+epochs: 1
+warmup_epochs: 0
+max_batches_per_epoch: 80
+warmup_batches: 10
+seeds: [0]
+
+loaders:
+  - {format: datasetfs, name: datasetfs-w0, num_workers: 0}
+  - {format: datasetfs, name: datasetfs-w1, num_workers: 1}
+  - {format: datasetfs, name: datasetfs-w2, num_workers: 2}
+  - {format: datasetfs, name: datasetfs-w4, num_workers: 4}
+
+drop_page_cache_between_cells: false
+daemon_binary: bin/datasetfs

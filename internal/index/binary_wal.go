@@ -7,6 +7,7 @@ import (
 	"hash/crc64"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -381,7 +382,7 @@ func (bw *BinaryWAL) Replay(idx *CoreIndex) (applied int, err error) {
 		}
 
 		// Apply the entry to the index
-		if err := applyEntry(e, idx); err != nil {
+		if err := applyEntryWithRoot(e, idx, filepath.Dir(bw.file.Name())); err != nil {
 			return applied, fmt.Errorf("apply WAL entry %d (op=%s): %w", applied+1, e.Op, err)
 		}
 		applied++
@@ -401,6 +402,13 @@ func (bw *BinaryWAL) WriteEntry(e *WALEntry) error {
 	bw.mu.Lock()
 	defer bw.mu.Unlock()
 
+	if err := bw.writeEntryLocked(e); err != nil {
+		return err
+	}
+	return bw.file.Sync()
+}
+
+func (bw *BinaryWAL) writeEntryLocked(e *WALEntry) error {
 	if bw.file == nil {
 		return fmt.Errorf("wal closed")
 	}
@@ -462,7 +470,18 @@ func (bw *BinaryWAL) WriteEntry(e *WALEntry) error {
 		return err
 	}
 
-	// fsync for durability
+	return nil
+}
+
+func (bw *BinaryWAL) LogBatch(entries []*WALEntry) error {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+
+	for _, entry := range entries {
+		if err := bw.writeEntryLocked(entry); err != nil {
+			return err
+		}
+	}
 	return bw.file.Sync()
 }
 

@@ -55,11 +55,11 @@ func (p *Planner) shardsForWorker() []int {
 	shards := p.snap.Shards
 	allIDs := make([]int, 0, len(shards))
 	for id, ss := range shards {
-		// The delta shard is served only once it actually holds added files
-		// (a pinned generation with no mutations has an empty delta). Base
+		// Delta shards are served only once they actually hold added files
+		// (a pinned generation with no mutations has empty deltas). Base
 		// shards are always scheduled, even if fully deleted — the loader frees
 		// the slot when no live objects remain.
-		if id == index.DeltaShardID && len(ss.Objects) == 0 {
+		if (ss.Type == index.Delta || id < 0) && len(ss.Objects) == 0 {
 			continue
 		}
 		allIDs = append(allIDs, id)
@@ -114,7 +114,6 @@ func (p *Planner) Initiate(ctx context.Context, wg *sync.WaitGroup) error {
 				case targetSlot = <-p.freeSlotChan:
 				}
 			}
-			log.Printf("[Planner w=%d] got free slot %d for shard %d", p.cfg.WorkerID, targetSlot, sID)
 			job := &LoadJob{
 				ShardID: sID,
 				SlotID:  targetSlot,
@@ -157,7 +156,6 @@ func (p *Planner) WatchRefCounts(ctx context.Context) {
 			for i := p.cfg.SlotStart; i < p.cfg.SlotEnd; i++ {
 				d := p.allocator.ReadRefCount(i)
 				if d == 0 && !slotIsFree[i] {
-					log.Printf("[Planner w=%d] slot %d is going to be used", p.cfg.WorkerID, i)
 					slotIsFree[i] = true
 					p.freeSlotChan <- i
 				} else if d != 0 && slotIsFree[i] {
