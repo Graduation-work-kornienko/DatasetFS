@@ -1,206 +1,224 @@
 # Архитектура DatasetFS
 
-DatasetFS — файловая система для обучения ML-моделей на больших датасетах.
-Состоит из **трёх слоёв**, общающихся через named pipes + shared memory:
+DatasetFS — runtime и формат хранения датасетов для ML-обучения. Система состоит из Go-демона, Python-клиента для PyTorch и benchmark harness. Основной training path не требует FUSE: данные идут через shared memory и named pipes; FUSE mount используется для POSIX-доступа и сценариев мутаций.
 
+## Схема
+
+```text
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Go daemon: cmd/datasetfs daemon                                             │
+│                                                                            │
+│ HTTP control plane :51409                                                   │
+│ /healthz /initialize_loading /metrics /metrics/pipeline /debug/pprof/*      │
+│                                                                            │
+│ Index layer                                                                 │
+│ metadata.parquet -> CoreIndex -> immutable Snapshot per loading session     │
+│ WAL, generation counter, pinned generations for mutation/vacuum safety       │
+│                                                                            │
+│ Storage layer                                                               │
+│ local tar shards, append-only delta shards, HTTP remote prefetch/cache       │
+│                                                                            │
+│ Per-worker pipeline                                                         │
+│ Planner -> BackgroundLoader -> optional Decoder -> Dealer                   │
+│                                                                            │
+│ Shared memory allocator                                                     │
+│ /tmp/mlfs_data.bin + /tmp/mlfs_refs.bin                                     │
+└─────────────────────────────────┬──────────────────────────────────────────┘
+                                  │
+                                  │ mmap + session FIFO binary frames
+                                  ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Python client: clients/python/dataset_fs.py                                 │
+│ DatasetFS(IterableDataset): opens the session FIFO, mmaps SHM, parses        │
+│ binary frames, decodes/transforms samples, decrements slot refcounts         │
+└─────────────────────────────────┬──────────────────────────────────────────┘
+                                  │ batches
+                                  ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│ torch.utils.data.DataLoader + benchmark/training code                       │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
-┌────────────────────────────────────────────────────────────────────────────┐
-│  Go daemon (cmd/datasetfs daemon)                                          │
-│  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │  HTTP control plane (internal/control): /healthz /initialize_loading│    │
-│  │                                     /metrics /debug/pprof/*        │    │
-│  └────────────────────────────────────────────────────────────────────┘    │
-│  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │  Per-worker Pipeline (internal/pipeline)                           │    │
-│  │  Planner → BackgroundLoader → [Decoder?] → DealerWorker            │    │
-│  └────────────────────────────────────────────────────────────────────┘    │
-│  ┌──────────────────────────────┐ ┌──────────────────────────────────┐     │
-│  │ SHM allocator (internal/shm) │ │ Storage (internal/storage)       │     │
-│  │ 9 slots × 110 MB + refcounts │ │ tar-shards on disk               │     │
-│  └──────────────────────────────┘ └──────────────────────────────────┘     │
-└────────────────────────────────────────────────────────────────────────────┘
-                          │ /tmp/mlfs_data.bin (mmap, SHARED)
-                          │ /tmp/mlfs_refs.bin (mmap, atomic int32 per slot)
-                          │ /tmp/datasetfs_pipe_<worker_id> (FIFO, JSON-per-line)
-                          ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│  Python client (clients/python/dataset_fs.py)                              │
-│  - DatasetFS(IterableDataset): __iter__ читает pipe, mmap'ает SHM,         │
-│    декодит (PIL или skip-if-rgb_uint8), вызывает transform                 │
-│  - Один DatasetFS на main process, PyTorch DataLoader spawn'ит N workers,  │
-│    каждый получает свой pipe_<worker_id>                                   │
-└────────────────────────────────────────────────────────────────────────────┘
-                          │ batches → torch.utils.data.DataLoader
-                          ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│  Benchmark harness (benchmarks/datasetfs_bench)                            │
-│  Уравнивает измерения между DFS / WebDataset / ImageFolder                 │
-└────────────────────────────────────────────────────────────────────────────┘
+
+## Формат на диске
+
+DatasetFS root содержит:
+
+```text
+metadata.parquet
+shard_0
+shard_1
+...
+shard_-1          # delta shard для мутаций, если они были
+datasetfs.wal     # WAL, если включен
 ```
 
-## Жизненный цикл
+`metadata.parquet` хранит список объектов и шардов: `path`, `shard_id`, `offset`, `size`, `deleted`, `meta`. Runtime загружает этот manifest в `CoreIndex`, а pipeline читает только immutable `Snapshot`, закрепленный за loading-сессией.
 
-### Подготовка данных (одноразово на датасет)
+Формат шардов — tar-like shard files. Для базовых датасетов converter пишет объекты в shard files и сохраняет offsets. Для мутаций `MutationManager` пишет новые payload'ы в delta shards, tombstone'ит удаленные записи и фиксирует изменения в WAL.
 
-`scripts/datasets/prepare_formats.py` качает датасет (fastai imagenette / imagewoof
-/ Speech Commands V2) и собирает три формата:
+## Жизненный цикл training-сессии
 
-- `data/formats/<ds>/imagefolder/` — symlink-фермa: `class/file.jpg`
-- `data/formats/<ds>/webdataset/` — tar-шарды с `<key>.jpg + <key>.cls`
-- `data/formats/<ds>/datasetfs/` — собственный формат: tar-шарды + `metadata.parquet`
+1. Пользователь запускает daemon: `bin/datasetfs daemon --no-mount --root <datasetfs-root>`.
+2. Daemon загружает `metadata.parquet`, строит `CoreIndex`, открывает WAL, поднимает HTTP control plane и, если не указан `--no-mount`, монтирует FUSE.
+3. Python создает `DatasetFS(num_workers=N, seed=..., decode_mode=...)`.
+4. Клиент отправляет `POST /initialize_loading` на `http://localhost:51409`.
+5. Daemon останавливает предыдущую loading-сессию, переиспользует общий SHM allocator, пинит immutable snapshot текущего поколения и создает `N` pipeline'ов.
+6. Ответ `/initialize_loading` содержит `session_id`, `pipe_template`, snapshot `generation`, подтвержденные decode/distributed параметры.
+7. Каждый PyTorch worker открывает свой FIFO вида `/tmp/datasetfs_pipe_<session_id>_<worker_id>`.
+8. `Planner` выбирает шарды и порядок объектов для worker'а, учитывая seed, worker id и DDP partition (`rank/world_size`, если задан).
+9. `BackgroundLoader` читает shard bytes в выделенный SHM slot.
+10. Если включен `decode_mode="rgb_uint8"`, `Decoder` декодирует JPEG и resize'ит изображения в packed RGB uint8 HWC внутри slot'а.
+11. `Dealer` формирует binary frame с метаданными объектов и пишет его в FIFO.
+12. Python читает frame, берет view на bytes из mmap, применяет `decode_fn`/`transform` или fast path `rgb_uint8`, отдает sample в DataLoader и батчем уменьшает refcount slot'а.
+13. Когда refcount становится 0, `Planner.WatchRefCounts` возвращает slot в пул.
 
-Имеется конвертер `datasetfs converter` (Go, подкоманда единого бинарника),
-которого `prepare_formats` дёргает для построения DFS-формата из imagefolder-структуры.
+## Компоненты Go
 
-### Обучение
-
-1. Запускается daemon: `bin/datasetfs daemon --no-mount --root <path>`. Daemon
-   читает `metadata.parquet`, строит `CoreIndex` (in-memory: `FileMap`, `ShardMap`),
-   ждёт IPC.
-2. Python создаёт `DatasetFS(num_workers=N, ...)`. В `__init__` шлёт `POST
-   /initialize_loading` с `num_workers + seed + decode-config`. Daemon
-   разбивает 9 SHM-слотов по N воркеров, инициализирует N пайплайнов.
-3. `DataLoader(ds, num_workers=N, ...)` — PyTorch спавнит N подпроцессов.
-   Каждый вызывает `DatasetFS.__iter__`, который открывает свой
-   `/tmp/datasetfs_pipe_<worker_id>`.
-4. На стороне daemon'а Planner шуффлит шарды для своего воркера, отправляет
-   `LoadJob` в BackgroundLoader. Тот читает шард в SHM-слот. Если
-   `decode_mode = rgb_uint8` — между Loader и Dealer вставлен Decoder,
-   который JPEG-декодит + resize'ит, перезаписывая слот пакованным RGB uint8.
-5. DealerWorker набирает `WindowSize = 3` слота, шуффлит объекты внутри окна,
-   шлёт `Batch` как JSON-line в pipe.
-6. Python читает pipe, `mmap`'ает слот по `offset+size`, копирует bytes,
-   декодит (PIL → tensor, либо `np.frombuffer` для rgb_uint8), декрементит
-   refcount слота через `/tmp/mlfs_refs.bin`.
-7. Когда refcount слота = 0, Planner.WatchRefCounts возвращает слот в пул.
-
-## Компоненты
-
-### Go daemon
-
-| Пакет | Что делает | Ключевые файлы |
+| Пакет | Роль | Важные файлы |
 |---|---|---|
-| `cmd/datasetfs` | единый бинарник (cobra): подкоманды `daemon` (Manifest+CoreIndex, IPC, опц. mount FUSE), `vacuum`, `converter` | `main.go`, `daemon.go`, `vacuum.go`, `converter*.go` |
-| `internal/index` | Manifest (на диске) + CoreIndex (в памяти): метаданные объектов и шардов | `tree.go`, `manifest.go`, `wal.go` |
-| `internal/storage` | tar-шарды: чтение, запись, валидация | `reader.go`, `writer.go`, `tar_append.go`, `validator.go` |
-| `internal/shm` | Allocator 9×110 MB + refcounts через `/tmp/mlfs_refs.bin`; atomic ops для синхронизации с Python | `allocator.go` |
-| `internal/pipeline` | Per-worker `Pipeline` собирает Planner + BackgroundLoader + (Decoder?) + DealerWorker. Конкурентная зона: горутины общаются через каналы. | `pipeline.go`, `planner.go`, `background_loader.go`, `decoder.go`, `dealer.go` |
-| `internal/pipeline (cgo)` | Swappable JPEG backend: `decoder_libjpeg.go` (libjpeg-turbo через cgo, default) и `decoder_purego.go` (stdlib, build tag `datasetfs_purego`) | см. [docs/optimizations/01](optimizations/01-server-side-decode.md) |
-| `internal/control` | HTTP server `:51409`: `/healthz`, `/initialize_loading` (создание сессии, поддерживает re-init), `/metrics` (JSON-метрики), `/debug/pprof/*` | `server.go` |
-| `internal/metrics` | Атомарные counter'ы + latency-гистограмма; экспортит JSON | `metrics.go` |
-| `internal/manager` | MutationManager (AddDeltaFile, DeleteFile) — фичу есть, тестов **нет** | `mutation_manager.go` |
-| `internal/vfs` | FUSE-ноды (POSIX-чтение через mount-point) — **untested**, бенчмарки не используют (все идут с `--no-mount`) | — |
+| `cmd/datasetfs` | Единый CLI: `daemon`, `converter`, `vacuum` | `main.go`, `daemon.go`, `converter*.go`, `vacuum.go` |
+| `internal/control` | HTTP control plane, lifecycle сессий, shared allocator reuse, maintenance gate | `server.go` |
+| `internal/index` | Manifest, Parquet storage, CoreIndex, Snapshot/MVCC, WAL | `manifest.go`, `parquet_manifest.go`, `tree.go`, `snapshot.go`, `binary_wal.go` |
+| `internal/storage` | Чтение/запись шардов, tar append, remote HTTP prefetch/cache | `reader.go`, `tar_append.go`, `prefetch.go`, `remote.go` |
+| `internal/pipeline` | Data plane: planner, loader, decoder, dealer, binary wire protocol | `pipeline.go`, `planner.go`, `background_loader.go`, `decoder.go`, `dealer.go` |
+| `internal/shm` | Shared-memory slots и atomic refcounts | `allocator.go` |
+| `internal/manager` | Мутации, delta shards, WAL запись и shutdown checkpoint | `mutation_manager.go`, `txlog.go` |
+| `internal/vacuum` | Compaction: перепаковка live objects и atomic swap manifest/shards | `vacuum.go`, `compact.go`, `cleanup.go` |
+| `internal/vfs` | FUSE nodes для POSIX create/read/list/unlink | `server.go` |
+| `internal/metrics` | Atomic counters, latency histograms, `/metrics` handlers | `metrics.go` |
 
-### Python-клиент
+## Python-клиент
 
-`clients/python/dataset_fs.py`:
+Основной класс: `clients/python/dataset_fs.py::DatasetFS`.
 
-- `DatasetFS(IterableDataset)` — основной класс
-- `decode_fn` — пользовательская функция bytes → intermediate (по умолчанию PIL.Image.open). Игнорируется в `decode_mode="rgb_uint8"`.
-- `transform` — пользовательский torchvision-композ. Должен соответствовать вы­ходу `decode_fn` (PIL.Image → tensor) или режиму rgb_uint8 (numpy HWC uint8 → tensor).
-- Аудио-датасеты: пользователь передаёт свой `decode_fn` (например, `soundfile.read(BytesIO)`) и `transform`. Поддержка протестирована через [tests/test_speech_commands*.py](../tests/test_speech_commands.py).
+Ключевые параметры:
 
-### Benchmark harness
+- `num_workers` — effective worker count для daemon; максимум 9 из-за `shm.NumSlots`.
+- `seed` — детерминированный shuffle across workers.
+- `decode_fn` — bytes-like object -> decoded object; по умолчанию PIL image decode.
+- `transform` — decoded object -> tensor/value.
+- `decode_mode="raw"` — daemon отдает bytes исходного payload'а.
+- `decode_mode="rgb_uint8"` + `decode_image_size` — daemon отдает уже декодированный RGB HWC uint8.
+- `decode_parallelism` — число decode goroutines per pipeline; 0 означает auto.
+- `rank/world_size` — DDP partition; предполагается один daemon на rank с отдельными SHM/FIFO/port settings на уровне запуска.
 
-`benchmarks/datasetfs_bench/`:
+`DatasetFS` наследуется от `IterableDataset`, поэтому порядок и sharding контролируются daemon'ом. Для custom audio/text/video payload'ов нужно передать module-level `decode_fn` и `transform`, чтобы они были picklable при Python multiprocessing `spawn`.
 
-| Подпакет | Что |
-|---|---|
-| `loaders/` | Унифицированные обёртки: `imagefolder.py`, `webdataset_loader.py`, `datasetfs.py`. Все используют общую `make_image_transform(image_size)` чтобы убрать transform как confounding variable |
-| `models/registry.py` | `simplecnn`, `resnet18`, `resnet50` |
-| `train/loop.py` | format-agnostic `train_one_epoch(...) → EpochStats` |
-| `metrics/` | `training.py` (per-epoch), `daemon.py` (scrape /metrics), `system.py` (psutil sampler) |
-| `runner/` | `daemon_ctl.py`, `cache_control.py`, `single_run.py`, `sweep.py`, `profile_run.py` |
-| `reporting/` | `plots.py` (bar charts MVP), `sweep_plots.py` (line plots vs axis) |
-| `configs/` | YAML-описания сценариев (см. [benchmarking.md](benchmarking.md)) |
-
-## IPC-протокол
+## IPC и shared memory
 
 ### HTTP control plane
 
-`POST /initialize_loading` принимает:
+`POST /initialize_loading` принимает JSON:
 
 ```json
 {
   "num_workers": 4,
   "seed": 42,
-  "decode": {"mode": "raw", "image_size": 0}
+  "decode": {"mode": "rgb_uint8", "image_size": 224, "parallelism": 2},
+  "distributed": {"rank": 0, "world_size": 1}
 }
 ```
 
-`mode ∈ {"raw", "rgb_uint8"}`. Ответ — JSON с подтверждённой конфигурацией (Python сверяет, что daemon согласился). Повторный вызов — **re-init**: daemon корректно тушит предыдущую сессию, открывает новую.
+Ответ содержит подтвержденную конфигурацию:
 
-`GET /metrics` отдаёт JSON со счётчиками (см. [benchmarking.md](benchmarking.md)).
+```json
+{
+  "num_workers": 4,
+  "session_id": 12,
+  "pipe_template": "/tmp/datasetfs_pipe_12_{worker_id}",
+  "generation": 7,
+  "decode": {"mode": "rgb_uint8", "image_size": 224, "parallelism": 2},
+  "distributed": {"rank": 0, "world_size": 1}
+}
+```
 
-`/debug/pprof/*` включён по умолчанию; mutex/block профили **выключены** до выставления флагов `--mutex-profile-rate=5 --block-profile-rate=10000`.
+Повторный `/initialize_loading` — это re-init: daemon останавливает старые pipeline goroutines, не размэпливает общий allocator, сбрасывает refcounts и создает новую session-specific FIFO группу. Это закрывает класс багов, где старый iterator и новая эпоха делили один pipe.
 
-### Data plane
+### SHM files
 
-- **SHM data**: `/tmp/mlfs_data.bin`, mmap MAP_SHARED, размер `9 × 110 MB = 990 MB`. Слот идентифицируется `slot_id ∈ [0..8]`. Внутри слота — packed bytes (raw shard или packed decoded RGB).
-- **SHM refs**: `/tmp/mlfs_refs.bin`, 9 × int32. Atomic-операции с обеих сторон. Python: `struct.pack("<i", new_val)`. Go: `atomic.LoadInt32` / `atomic.SwapInt32`.
-- **Pipe**: `/tmp/datasetfs_pipe_<worker_id>`, FIFO, JSON-line на батч. Формат:
-  ```json
-  {"items": [
-    {"slot_id": 3, "offset": 314572800, "size": 27648,
-     "path": "data/raw/imagenette2/train/n03394916/n03394916_40715.JPEG",
-     "meta": {"label": "n03394916"}},
-    ...
-  ]}
-  ```
-  Пустой `items: []` — сигнал конца эпохи.
+- `/tmp/mlfs_data.bin` — data mmap. Сейчас 9 slots × 110 MB.
+- `/tmp/mlfs_refs.bin` — int32 refcount на slot.
+- Slot partitioning: `SlotRange(workerID, numWorkers)` раздает contiguous диапазоны; первые `9 % N` workers получают на один slot больше.
+
+Python уменьшает refcount батчем после обработки frame. Go переиспользует slot только когда refcount стал 0.
+
+### Binary FIFO frame
+
+Начиная с opt 03 wire protocol не JSON. `Dealer` пишет length-prefixed binary frame, а Python парсит фиксированный columnar блок через `numpy.frombuffer`.
+
+```text
+magic u32 = 0x44465331  # "DFS1"
+total_len u32           # bytes after magic+total_len
+generation u64          # snapshot generation
+item_count u32
+blob_len u32
+
+item_count × 28 bytes:
+  slot_id i32
+  offset  i64
+  size    i64
+  path_len u32
+  meta_len u32
+
+blobs:
+  path bytes + meta JSON bytes for every item
+```
+
+Пустой frame (`item_count == 0`) означает конец эпохи. `generation` помогает тестам обнаружить torn reads при concurrent mutation.
 
 ## Decode modes
 
-| Mode | Что в slot'е | Что в pipe | Что в Python |
+| Mode | Что лежит в SHM slot | Что делает Python | Когда использовать |
 |---|---|---|---|
-| **`raw`** (по умолчанию) | сырой шард, items указывают на JPEG-байты внутри | offsets указывают на JPEG-данные | PIL.Image.open → resize → ToTensor |
-| **`rgb_uint8`** | packed RGB uint8 HWC, items указывают на `image_size² × 3` байт | offsets указывают на packed RGB | np.frombuffer + reshape(H,W,3) → ToTensor (без PIL) |
+| `raw` | исходные shard bytes | `decode_fn` + `transform` | универсальный путь: изображения, аудио, текст, произвольные bytes |
+| `rgb_uint8` | packed RGB uint8 HWC фиксированного размера | `np.frombuffer` -> reshape -> `transform` | изображения, когда нужно убрать PIL decode/resize из Python path |
 
-Server-side decode реализован как опциональный стейдж между BackgroundLoader и DealerWorker. Условное включение — в `pipeline.NewPipeline`, по `cfg.Decode.IsServerSide()`. Полная история — в [docs/optimizations/01-server-side-decode.md](optimizations/01-server-side-decode.md).
+`rgb_uint8` реализован как optional stage между `BackgroundLoader` и `Dealer`. JPEG backend по умолчанию использует libjpeg-turbo через cgo; pure-Go fallback собирается через `make build-purego`.
 
-## Конвенции и подводные камни
+## Мутации, snapshots и vacuum
 
-### Сборка
+DatasetFS поддерживает POSIX-мутации через FUSE path и внутренний `MutationManager`.
 
-- **cgo обязателен для daemon'а** в дефолтном билде (libjpeg-turbo). Makefile выставляет `CGO_ENABLED=1` + `PKG_CONFIG_PATH=/opt/homebrew/opt/jpeg-turbo/lib/pkgconfig`. Для pure-Go fallback — `make build-purego`.
-- **macOS Homebrew**: `brew install jpeg-turbo`. На Linux: `apt install libturbojpeg0-dev` + переменная `PKG_CONFIG_PATH` корректируется.
+- Каждая mutation bump'ает generation в `CoreIndex`.
+- Loading session пинит immutable `Snapshot`; все workers одной эпохи видят одну generation.
+- Delete помечает object tombstone'ом.
+- Add/replace пишет payload в delta shard и добавляет запись в индекс.
+- WAL фиксирует mutation operations и replay'ится при старте.
+- Vacuum перепаковывает live objects, удаляет tombstones и rewrites manifest; background vacuum включается флагом `--auto-vacuum` и проходит через maintenance gate.
 
-### Python multi-worker
+Это важно для online-learning сценария: текущая эпоха не должна видеть «рваное» состояние датасета, даже если параллельно происходят writes/deletes.
 
-- **macOS / Python 3.13 default start method = `spawn`**. Всё, что передаётся в worker'ов, должно быть picklable. Транзитивно: lambdas / closures **нельзя** в `collate_fn`, `transform`, `decode_fn`. Использовать module-level функции + `functools.partial`.
-- **DFS multi-worker**: один pipe на worker (`/tmp/datasetfs_pipe_<worker_id>`). Daemon создаёт N пайплайнов через `POST /initialize_loading {"num_workers": N}`. Max N = **9** (= NumSlots).
+## Remote storage
 
-### Шардинг и слоты
+Daemon может стартовать с HTTP root:
 
-- `shm.NumSlots = 9`, `shm.SlotSize = 110 MB`.
-- **Слот-партиция**: каждому воркеру даётся contiguous диапазон слотов. Первые `(9 % N)` воркеров получают по +1 слоту.
-- **Dealer window**: `DealerWorker` блокируется только на первой `SlotMeta`, потом non-blockingly дренирует до `WindowSize=3`. Раньше блокировалось до полного окна — был deadlock при «шарды > слотов на воркера», см. историю в [internal/pipeline/dealer.go:55-56](../internal/pipeline/dealer.go).
-- **Detector starvation**: `metrics.SlotStarvationTotal` — счётчик случаев, когда Planner не нашёл свободный слот.
-
-### Известные баги в истории
-
-- **TotalSize bug**: converter в одной из ранних версий писал 0 в `total_size` манифеста. Loader читал 0 байт → пустой SHM → silent PIL decode failure → refcount не декрементился → deadlock для воркеров с shards>slots. Фикс в [internal/storage/tar_append.go](../internal/storage/tar_append.go)
-- ~~`cmd/fuse_daemon/main_test.go` вызывал `main()` и виснул~~ — этого файла больше нет (бинарники объединены в `cmd/datasetfs`). `go test ./internal/... ./cmd/datasetfs/...` (или `make go-test`) безопасен.
-
-### Imagefolder и Speech Commands
-
-- `imagefolder_index` keys = **`"class/filename"`**, не basename. Speech Commands V2 имеет одинаковые basename'ы между классами (одна и та же запись разных слов).
-- **Imagefolder prep** строит per-class symlinks в `data/formats/<ds>/imagefolder/`, фильтрует по `ds.classes` (исключает `_background_noise_` и т.п.). DFS converter (Go) разворачивает symlink через `os.Stat`.
-
-### Audio
-
-- `torchaudio.load(BytesIO)` требует `torchcodec`, которого нет на macOS PyPI. **Использовать `soundfile.read` напрямую** в `decode_fn`. `torchaudio` для transforms (MelSpectrogram etc.) — нормально.
-
-### Cache control в бенчмарках
-
-- `cache_control.drop_page_cache()` запускает `sudo -n purge` на macOS / `drop_caches` на Linux. **Требует passwordless sudo**. У текущего пользователя настроено через `/etc/sudoers.d/datasetfs-bench`.
-- Если sudo не настроен — runner предупреждает и продолжает с `cache_state=uncontrolled`.
-- Drop вызывается **между ячейками** (per `loader×seed`), **не между эпохами**. Внутри ячейки warmup epoch разогревает кэш для measured epoch.
-
-### Daemon-аргументы
-
+```bash
+bin/datasetfs daemon --no-mount \
+  --root http://localhost:8000/datasetfs \
+  --cache-dir runs/remote_cache \
+  --prefetch-concurrency 4
 ```
-datasetfs daemon --no-mount --root <path>
-                 [--mutex-profile-rate N]   # 1-in-N sampling, ~1-3% overhead
-                 [--block-profile-rate ns]  # block events >ns
-```
+
+Текущая реализация: manifest скачивается в cache, shards догружаются background prefetcher'ом. Для бенчмарков remote path сравнивается с WebDataset HTTP при одинаковом throttle/staging subset.
+
+## Benchmark harness
+
+`benchmarks/datasetfs_bench` строит сопоставимые DataLoader'ы для разных форматов и пишет единые CSV/plots/reports. Он не является частью hot path DatasetFS, но задает воспроизводимую методологию измерений.
+
+Основные части:
+
+- `loaders/` — ImageFolder, WebDataset, DatasetFS, LMDB, HDF5, TFRecord, HuggingFace, FFCV, synthetic.
+- `train/loop.py` — общий training loop и steady-state метрики.
+- `metrics/` — training, system sampler, daemon sampler.
+- `runner/` — single-run, sweep, real-universal, remote preflight, mutation, pipeline memory.
+- `reporting/` — plots и Markdown reports.
+
+## Ограничения и подводные камни
+
+- `num_workers` ограничен 9 effective workers, потому что allocator имеет 9 slots.
+- FUSE path нужен для POSIX и mutation сценариев; большинство training/benchmark запусков используют `--no-mount`.
+- Дефолтная сборка требует cgo + libjpeg-turbo. На macOS Makefile ожидает Homebrew путь `/opt/homebrew/opt/jpeg-turbo/lib/pkgconfig`.
+- `go test ./...` может быть менее надежным, чем `make go-test`, потому что Makefile выставляет нужный cgo env.
+- На macOS DataLoader workers используют `spawn`; нельзя передавать lambdas/closures в `decode_fn`, `transform`, `collate_fn`.
+- `main.py` в корне — устаревший ручной скрипт. Актуальные сценарии находятся в Makefile и `benchmarks/datasetfs_bench`.
+- Design docs про vacuum/remote/manifest описывают замысел; фактическое состояние сверять с этим файлом, `docs/status.md`, Makefile и тестами.

@@ -1,35 +1,52 @@
 # Журнал оптимизаций DatasetFS
 
-Каждый файл здесь — история одной оптимизации: контекст, baseline-цифры до,
-гипотеза, реализация, измерения после, интерпретация и следующий шаг.
+Папка фиксирует историю производительных изменений DatasetFS: что было bottleneck'ом, какая была гипотеза, что изменили в архитектуре, чем проверили корректность и какие получили числа.
 
-Файлы пишутся **по горячим следам**, пока понятно, какие альтернативы
-рассматривались и почему. Цель — чтобы спустя месяц (или на защите) можно было
-ответить на вопрос «а почему вы пошли в эту сторону, а не в другую» без раскопок
-в git-логах и conversation-истории.
+Этот журнал не заменяет [architecture.md](../architecture.md). Архитектура описывает текущее состояние, а файлы здесь объясняют, почему система пришла именно к нему.
 
-## Формат имени
+## Как читать
 
-`NN-короткое-имя.md`, где `NN` — порядковый номер оптимизации (`01`, `02`, …).
-Имя — kebab-case, отражает суть, не детали реализации
-(`01-server-side-decode`, не `01-go-jpeg-via-pipeline-stage`).
+Рекомендуемый порядок:
 
-## Структура файла
+1. [01-server-side-decode.md](01-server-side-decode.md) — почему появился optional decode stage в daemon.
+2. [02-parallel-decode.md](02-parallel-decode.md) — почему decode stage стал parallel и почему одного libjpeg-turbo backend'а было недостаточно.
+3. [03-pipeline-transport.md](03-pipeline-transport.md) — почему JSON-over-pipe заменен на binary frame и почему это важно для аудио/cheap-decode данных.
 
-1. **Кратко** — что попробовали, чем закончилось.
-2. **Контекст и мотивация** — на каких данных проблема была локализована.
-3. **Baseline** — измеримые цифры ДО.
-4. **Гипотеза** — что предполагали и почему.
-5. **Архитектура / реализация** — что реально сделали, без копипасты кода (его покажет git).
-6. **Тесты** — как зафиксировали корректность.
-7. **Результаты** — измеримые цифры ПОСЛЕ + сравнение с baseline.
-8. **Интерпретация** — почему получилось то, что получилось.
-9. **Следующий шаг** — что делать дальше (или «зафиксировано как future work»).
+## Текущее состояние optimizations
 
-## Список
+| # | Оптимизация | Статус | Текущее влияние на архитектуру |
+|---|---|---|---|
+| [01](01-server-side-decode.md) | Server-side JPEG decode + resize | Завершена | В pipeline есть optional `Decoder` stage; client поддерживает `decode_mode="rgb_uint8"`; default build использует libjpeg-turbo через cgo |
+| [02](02-parallel-decode.md) | Parallel server-side decode | Завершена | `decode.parallelism` прокидывается через `/initialize_loading`; auto-K = `NumCPU/NumWorkers`; `Pipeline.Stop()` join'ит goroutines до allocator teardown |
+| [03](03-pipeline-transport.md) | Binary wire + zero-copy SHM view + batched refcount | Завершена | FIFO protocol теперь binary length-prefixed frame, не JSON; Python парсит columnar block через `np.frombuffer`; refcount уменьшается батчем per slot |
 
-| # | Оптимизация | Даты | Статус | Headline |
-|---|---|---|---|---|
-| [01](01-server-side-decode.md) | Server-side decode (JPEG decode + resize в daemon) | 2026-05-21 → 2026-05-22 | ✅ Завершена (закрыта opt 02) | Backend-swap (libjpeg-turbo) закрыл gap с -14% до -1.4% на ResNet-18; архитектура подтверждена |
-| [02](02-parallel-decode.md) | Параллельный server-side decode (пул K воркеров) | 2026-06-01 | ✅ Завершена | rgb_uint8 num_workers=0: **487 → 3136 sps (6.4×)**, обогнал raw PIL в 4.6×; +фикс teardown-SIGSEGV |
-| [03](03-pipeline-transport.md) | Транспорт пайплайна: бинарный wire вместо JSON-over-pipe + zero-copy SHM + батч-refcount (общий путь для аудио и любых типов) | 2026-06-02 | ✅ Завершена | Чистый транспорт **144.5k → ~205k sps (1.4×)**; +фикс slot-leak на пропущенных сэмплах; +аудио-бенч (G8) |
+## Главные выводы
+
+- Opt 01 подтвердила архитектурную идею: daemon может выполнять compute между storage и Python, чего нет у ImageFolder/WebDataset.
+- Pure Go JPEG был слишком медленным; libjpeg-turbo закрыл gap в compute-bound ResNet-18 сценарии до почти паритета.
+- Opt 02 показала, что server-side decode раскрывается только после parallelism: последовательный daemon decode переносил bottleneck из Python в один Go core.
+- Opt 03 показала, что после устранения image decode bottleneck следующий общий слой — transport. Binary frame особенно важен для аудио и других cheap-decode payload'ов.
+- Побочные correctness fixes оказались не менее важны, чем speedups: join goroutines before unmap, skipped-sample refcount accounting, session-specific FIFO paths.
+
+## Связанные команды
+
+```bash
+make test-decode
+make test-pipeline-leak
+make bench-decode-compare
+make bench-decode-compare-simplecnn
+make bench-decode-parallelism
+make bench-audio
+```
+
+## Шаблон для будущих оптимизаций
+
+Новый файл `NN-short-name.md` должен отвечать на вопросы:
+
+1. Что было измерено как bottleneck?
+2. Какая falsifiable-гипотеза была проверена?
+3. Что изменилось в data path?
+4. Какие тесты доказывают корректность?
+5. Какие числа до/после?
+6. Где граница применимости результата?
+7. Что стало следующим bottleneck'ом?

@@ -1,158 +1,197 @@
 # Тесты DatasetFS
 
-Каталог: [tests/](../tests/). Запуск: `pytest`, либо точечные Makefile-таргеты.
+Каталог тестов: [tests/](../tests/). Go unit tests находятся рядом с пакетами в `internal/**` и `cmd/datasetfs/**`.
 
-## Категории
+Рекомендуемые entrypoints:
+
+```bash
+make go-test
+make test
+make thesis-code-gate
+```
+
+Не все тесты одинаково портативны. Часть сценариев требует подготовленных датасетов, macFUSE, Docker/MinIO, Linux-only зависимостей или длительного CPU time.
+
+## Категории покрытия
 
 | Категория | Цель | Файлы |
 |---|---|---|
-| **Корректность данных** | Доказать, что DFS отдаёт ровно те же байты/лейблы, что и raw imagefolder, без дублей, без пропусков, без коллизий | `test_manifest.py`, `test_correctness.py`, `test_imagewoof.py`, `test_speech_commands.py` |
-| **Корректность обучения** | Доказать, что на DFS-данных модель учится не хуже, чем на ImageFolder (loss-decreasing + loss-parity) | `test_training.py`, `test_speech_commands_training.py` |
-| **Стабильность daemon'а** | Доказать, что 20+ сессий не дают деградации throughput / роста RSS | `test_stability.py` |
-| **Server-side decode** | Доказать, что rgb_uint8 мод выдаёт пиксели, эквивалентные PIL Resize | `test_decode.py` |
+| Manifest/index/storage | Проверить `metadata.parquet`, shard offsets/sizes, WAL, snapshots, vacuum | `test_manifest.py`, `internal/index/*_test.go`, `internal/storage/*_test.go`, `internal/vacuum/*_test.go` |
+| Data correctness | DFS выдает тот же payload/labels без дублей и пропусков | `test_correctness.py`, `test_imagewoof.py`, `test_speech_commands.py` |
+| Training correctness | Данные пригодны для обучения, loss падает и сравним с baseline | `test_training.py`, `test_speech_commands_training.py`, `test_universal_datasets_training.py` |
+| Decode path | `rgb_uint8` эквивалентен PIL resize/to-tensor | `test_decode.py`, `internal/pipeline/decoder_test.go` |
+| Pipeline lifecycle | Re-init, session FIFO, crash/EOF bounded behavior, cleanup, RSS plateau | `test_deferred_gaps.py`, `test_pipeline_leak.py`, `test_stability.py` |
+| FUSE/mutations | POSIX path, snapshot consistency under concurrent writes/deletes | `test_deferred_gaps.py`, `test_mutation_consistency.py`, `internal/manager/*_test.go` |
+| Remote storage | HTTP/MinIO remote path and preflight/reporting | `test_remote_minio.py`, `test_remote_preflight.py`, `test_remote_plots.py` |
+| Benchmark/reporting code | CSV/plots/reporting не ломаются | `test_*plots.py`, `test_benchmark_report.py`, `test_training_metrics.py`, `test_wait_compute_plots.py` |
+| Format matrix loaders | Extra formats отдают совместимые batches | `test_format_loaders.py`, `test_format_mutation_benchmark.py`, `test_real_universal_*` |
 
-## Запуск
+## Makefile targets
 
-```bash
-# Phase 1 verification gate (~30-40 мин CPU суммарно)
-make test               # = test-manifest + test-correctness + test-imagewoof + test-training
+| Target | Что запускает | Зависимости/оговорки |
+|---|---|---|
+| `make go-test` | `go test ./internal/... ./cmd/datasetfs/...` с cgo env | Нужен libjpeg-turbo для default build |
+| `make test` | `test-manifest`, `test-correctness`, `test-imagewoof`, `test-training` | Нужны подготовленные image datasets |
+| `make test-manifest` | `tests/test_manifest.py` | Читает Parquet manifest |
+| `make test-correctness` | Imagenette data correctness | Дольше smoke-тестов |
+| `make test-imagewoof` | Cross-dataset correctness на Imagewoof | Нужен Imagewoof |
+| `make test-training` | Imagenette training correctness | CPU-heavy |
+| `make test-audio` | Speech Commands correctness + training | Нужен `make data-audio` |
+| `make test-mutation` | Real FUSE mutation consistency | Нужен macFUSE |
+| `make test-deferred-gaps` | Crash/cleanup/FUSE deferred coverage | FUSE parts skip without macFUSE |
+| `make test-datasetfs-writer` | Python writer/helper path | Быстрый |
+| `make test-real-universal-prep` | Prep scaffolding for real-universal datasets | Быстрый |
+| `make test-universal-datasets` | Synthetic text/audio/image+tabular training through daemon | Без внешних downloads |
+| `make test-reporting` | py_compile + reporting unit tests | Без daemon |
+| `make test-remote` | MinIO + remote HTTP training | Docker + `minio` SDK; skips if unavailable |
+| `make test-stability` | 20 loading sessions against one daemon | Несколько минут |
+| `make test-decode` | Pixel correctness for `rgb_uint8` | Быстрый |
+| `make test-format-loaders` | Extra storage formats batch invariants | Нужен `make data-formats-extra` |
+| `make test-pipeline-leak` | Skipped samples must not leak slots | Быстрый regression |
+| `make test-pipeline-rss` | Repeated session RSS plateau | Synthetic dataset |
+| `make test-pipeline-rss-mutation` | RSS plateau under bounded FUSE replacements | Нужен macFUSE |
+| `make thesis-code-gate` | Fast pre-experiment gate | Сборка daemon + несколько Python/Go suites |
 
-# Точечно
-make test-manifest      # ~30 сек
-make test-correctness   # ~5-10 мин
-make test-imagewoof     # ~3 мин
-make test-training      # ~10-20 мин (тренировка ResNet/SimpleCNN)
+## Что проверяют основные тесты
 
-# Аудио (требует `make data-audio` — Speech Commands V2 ~2.4 GB)
-make test-audio         # = test-audio-correctness + test-audio-training
+### `test_manifest.py`
 
-# Phase 3
-make test-stability     # ~4 мин: 20 сессий
-make test-decode        # ~15 сек: 20 файлов pixel-сравнение vs PIL
+Проверяет соответствие `metadata.parquet` фактическим shard files:
 
-# Go-тесты
-make go-test            # = go test ./internal/... ./cmd/datasetfs/...
-```
+- каждый manifest object указывает на существующий shard;
+- `offset/size` попадают в реальные границы shard;
+- `total_size` shard'а не расходится с физикой;
+- нет дубликатов object paths;
+- metadata читается через актуальный Parquet path.
 
-## По файлам
+### `test_correctness.py` и `test_imagewoof.py`
 
-### `test_manifest.py` — целостность манифеста
+Проверяют image loading path:
 
-Проверяет соответствие `metadata.parquet` на диске и того, что реально лежит в
-tar-шардах. Цели:
-- Размер каждого объекта в манифесте == offset/size в tar-шарде
-- ShardID в манифесте == имя файла шарда
-- `total_size` шарда в манифесте корректный (см. историю про TotalSize bug)
-- Нет дубликатов path/key
+- completeness: за эпоху приходят все expected objects;
+- no duplicates;
+- multi-worker disjointness;
+- seed/shuffle behavior;
+- byte hash equivalence с raw imagefolder;
+- labels совпадают с ImageFolder class directory;
+- edge values `num_workers ∈ {0,1,2,4,8}`;
+- re-init resilience.
 
-**Покрытие**: Imagenette (полный датасет).
+`test_imagewoof.py` повторяет ключевые checks на другом датасете, чтобы не overfit'иться на Imagenette.
 
-### `test_correctness.py` — image correctness (Imagenette)
+### `test_speech_commands.py` и `test_speech_commands_training.py`
 
-P0+P1 тесты (по терминологии плана):
+Проверяют generic raw payload path на audio:
 
-- **Completeness** — DFS отдаёт ровно `len(imagefolder)` объектов за эпоху
-- **No duplicates** — каждый объект ровно один раз
-- **Multi-worker disjoint** — при `num_workers=4` объекты разных воркеров не пересекаются
-- **Shuffle разнообразие** — два прогона с разными seed дают разный порядок
-- **Byte-hash equivalence** — для каждого path: `sha256(DFS bytes) == sha256(raw file)`
-- **Labels per-file** — лейбл, выданный DFS, совпадает с папкой ImageFolder
-- **Edge num_workers** — `num_workers ∈ {0, 1, 2, 4, 8}` все корректно
-- **Re-init resilience** — несколько `/initialize_loading` подряд, каждая сессия чистая
-- **Seed validation** — некорректный seed (None, negative, non-int) → понятная ошибка
+- custom `decode_fn` через `soundfile.read(BytesIO)`;
+- shape/sample_rate/non-silent sanity;
+- MelSpectrogram/transform path;
+- loss decreases на audio model.
 
-**Покрытие**: Imagenette. Не покрывает: rgb_uint8 mode (отдельно в test_decode), mutations, FUSE-mount.
+### `test_training.py`
 
-### `test_imagewoof.py` — cross-dataset smoke
+Проверяет, что DFS path не только байтово корректен, но и пригоден для обучения:
 
-Прогоняет ключевые тесты из `test_correctness.py` на Imagewoof. Цель — убедиться,
-что прохождение test_correctness — не overfit на одном датасете.
+- loss decreases на DFS;
+- final loss parity с ImageFolder baseline при одинаковом seed/model setup.
 
-### `test_speech_commands.py` — audio correctness
+### `test_decode.py`
 
-Те же P0+P1 чек-листы, плюс аудио-специфические:
-- **sample_rate** — выданный сэмпл декодится с правильной частотой
-- **shape** — после decode/transform тензор имеет ожидаемую форму
-- **non-silent** — не все сэмплы — тишина (catch decode-failure-as-zeros)
+Проверяет server-side decode:
 
-Использует `soundfile.read(BytesIO)` как `decode_fn` (см. конвенции в [architecture.md](architecture.md#audio)).
+- DFS `rgb_uint8` output сравнивается с `PIL.Image.open + resize(BILINEAR)`;
+- shape `(H, W, 3)`, dtype `uint8`;
+- mean/p95/max pixel diff в допустимых пределах;
+- `transforms.ToTensor()` получает float CHW `[0, 1]`.
 
-### `test_training.py` — training correctness (Imagenette)
+Тест backend-агностичен: должен проходить и с libjpeg-turbo, и с pure-Go decoder.
 
-Два теста, оба используют `SimpleCNN` + SGD, 3 эпохи:
+### `test_deferred_gaps.py`
 
-- **`test_loss_decreases_imagenette`** — на DFS loss падает монотонно (с ±1% запасом на шум), финальный loss ≥ 5% ниже random baseline `ln(num_classes)`. Catches: corrupt data, mislabeled samples, broken collate, shuffle without replacement breaking SGD.
-- **`test_loss_parity_with_imagefolder`** — train с тем же seed на DFS и raw ImageFolder, final losses различаются <25%. Catches: tampering с byte content, mis-mapping label→idx.
+Закрывает старые deferred gaps:
 
-### `test_speech_commands_training.py`
+- concurrent loaders/session FIFO failure mode: новая session не делит pipe со старым iterator;
+- daemon crash mid-epoch: iterator завершается bounded failure/EOF, не висит бесконечно;
+- cleanup verification: после stop не остаются `/tmp/mlfs_*` и `datasetfs_pipe_*`;
+- FUSE POSIX smoke: create/read/list/unlink через mount path.
 
-Аналог для аудио: SimpleCNN на MelSpectrogram-фичах, проверка что loss падает.
-Цель — доказать **data-agnostic** работу клиента (decode_fn-точка расширения работает).
+FUSE test skips, если macFUSE недоступен.
 
-### `test_stability.py` — Phase 3 stability gate
+### `test_mutation_consistency.py`
 
-Один тест, ~4 мин:
+Проверяет F1/snapshot behavior:
 
-- 20 сессий × 1 эпоха на одном daemon-процессе
-- Каждая сессия = свежий `/initialize_loading`
-- Метрики: per-epoch throughput (sps), per-epoch daemon RSS (psutil)
-- Ассерты:
-  - **Throughput retention**: `mean(last 3 epochs) / epoch_2 ≥ 0.85` (catches refcount drift, goroutine leaks, FD leaks)
-  - **RSS growth**: `final_rss / epoch_2_rss ≤ 2.0` (catches memory leaks, allocator не освобождает SHM)
+- запускает daemon с FUSE mount;
+- читает DatasetFS epoch;
+- параллельно делает writes/deletes через POSIX mount;
+- проверяет, что epoch видит один pinned generation и не получает torn reads.
 
-**Закрытый gap**: deferred test #1 из [memory:project_deferred_tests](../.claude/projects/-Users-true-danil-12-Graduation-work-DatasetFS/memory/project_deferred_tests.md). Last run: retention 99.76%, growth 1.00×.
+### `test_pipeline_leak.py`
 
-### `test_decode.py` — Phase 3 server-side decode
+Регрессии pipeline lifecycle:
 
-Два теста:
+- skipped samples (`decode_fn -> None`) все равно декрементят refcount;
+- иначе slots залипают, когда shards > slots;
+- repeated session restarts не должны приводить к RSS creep;
+- отдельная проверка RSS plateau under bounded FUSE replacements.
 
-- **`test_rgb_uint8_decode_matches_pil`** — 20 случайных файлов из Imagenette. Для каждого: DFS rgb_uint8 → uint8 HWC ndarray vs `PIL.Image.open + resize(BILINEAR)` → ndarray. Asserts:
-  - Same shape (H, W, 3), dtype uint8
-  - `mean abs diff < 5/255` per-pixel (среднее по 20 файлам)
-  - `p95 diff < 25/255`
-  - `max diff < 90/255` (защита от RGB↔BGR swap или stride bugs)
-- **`test_rgb_uint8_with_to_tensor_yields_float_chw`** — end-to-end: rgb_uint8 + `transforms.ToTensor()` → правильный float32 CHW [0,1].
+### `test_stability.py`
 
-**Backend-агностичный**: оба теста проходят и на pure-Go decoder'е, и на libjpeg-turbo. С libjpeg-turbo пиксели ещё ближе к PIL (PIL внутри тоже libjpeg).
+Длинный health gate:
 
-## Что покрыто хорошо
+- много loading sessions против одного daemon process;
+- проверяет throughput retention;
+- проверяет daemon/Python RSS growth;
+- ловит refcount drift, goroutine/FD leaks, allocator lifecycle issues.
 
-- Корректность данных на images + audio
-- Multi-worker сценарии (0, 1, 2, 4, 8)
-- Re-init поведение daemon'а
-- Long-running stability (20 сессий)
-- Server-side decode pixel-correctness
+### Reporting tests
 
-## Coverage gaps (deferred tests из memory)
+`test_daemon_timeseries_plots.py`, `test_real_universal_plots.py`, `test_remote_plots.py`, `test_system_timeseries_plots.py`, `test_pipeline_memory_plots.py`, `test_training_stage_plots.py`, `test_wait_compute_plots.py`, `test_benchmark_report.py`, `test_training_metrics.py` защищают benchmark infrastructure от silent breakage. Они особенно важны, потому что дипломные графики строятся scripts, а не вручную.
 
-| # | Gap | Зачем нужен | Сложность |
-|---|---|---|---|
-| ~~1~~ | ~~**Long-running stability**~~ | ~~Refcount drift, FD/goroutine/memory leaks~~ | ~~Done~~ |
-| ~~2~~ | ~~**Concurrent loaders failure mode**~~ | ~~Покрыто `tests/test_deferred_gaps.py`: session-specific FIFO paths не дают stale iterator и новой эпохе делить один pipe; старый iterator завершается bounded EOF/error или дочитывает корректные данные~~ | ~~done~~ |
-| 3 | **Daemon crash mid-epoch** | Покрыто `tests/test_deferred_gaps.py`: kill daemon во время итерации должен завершиться bounded failure, без бесконечного hang | done |
-| 4 | **Cleanup verification** | Покрыто `tests/test_deferred_gaps.py`: после `daemon.stop()` assert'им отсутствие `/tmp/mlfs_*` и `datasetfs_pipe_*` | done |
-| ~~5~~ | ~~**FUSE-mount mode**~~ | ~~Покрыто `tests/test_deferred_gaps.py`: POSIX create/read/list/unlink через FUSE mount работает; `Create` обновляет inode metadata после commit в delta shard~~ | ~~done~~ |
-| 6 | **Mutations** (`DeleteFile` / `AddDeltaFile`) | Покрыто `tests/test_mutation_consistency.py`: real FUSE writes/deletes + DatasetFS epoch snapshot consistency | done |
+## Go unit tests
 
-Полный контекст: [memory/project_deferred_tests.md](../.claude/projects/-Users-true-danil-12-Graduation-work-DatasetFS/memory/project_deferred_tests.md).
+Go tests покрывают внутренние инварианты:
 
-## Соглашения о тестовых фикстурах
+- `internal/index`: Parquet manifest, WAL, binary WAL, snapshots.
+- `internal/storage`: prefetch/cache behavior и shard helpers.
+- `internal/pipeline`: dealer/distributer/decoder/pipeline invariants, binary wire, parallel decode.
+- `internal/manager`: mutation manager and delta shard behavior.
+- `internal/vacuum`: compaction, dry-run, fragmentation/reload cases.
+- `internal/metrics`: counters/histograms handler behavior.
+- `cmd/datasetfs`: converter/vacuum/daemon CLI-adjacent checks.
+
+Использовать `make go-test`, а не голый `go test ./...`, чтобы получить правильные cgo flags для libjpeg-turbo.
+
+## Fixtures и conventions
 
 `tests/conftest.py`:
 
-- **Session-scoped**: `repo_root`, `data_root`, `daemon_binary` (билдит daemon с cgo+libjpeg-turbo один раз на сессию), `converter_binary`, `imagenette_prepared`, `imagewoof_prepared`, `speech_commands_prepared` (готовят данные идемпотентно — пропускают, если уже на диске).
-- **Function-scoped**: `daemon` (поднимает daemon на Imagenette), `daemon_imagewoof`, `daemon_speech_commands`. Поддерживает `.restart()` для тестов, итерирующих несколько эпох. Cleanup `/tmp` в teardown.
-- `.pid` property у `DaemonManager` — для psutil-сэмплинга RSS (нужен `test_stability`).
+- собирает `bin/datasetfs` один раз на pytest session;
+- готовит datasets idempotently;
+- предоставляет daemon managers для Imagenette/Imagewoof/Speech Commands;
+- поддерживает `.restart()` для fresh loading session;
+- чистит `/tmp/mlfs_*` и `/tmp/datasetfs_pipe_*`;
+- дает `.pid` для psutil/RSS checks.
 
 `tests/helpers.py`:
 
-- `imagefolder_index(root)` — `dict[path → class]`. Ключ — `"class/filename"` (см. конвенцию в [architecture.md](architecture.md#imagefolder-и-speech-commands)).
-- Прочие хелперы для хеш-сравнения, etc.
+- `imagefolder_index(root)` строит ключи вида `class/filename`, что важно для Speech Commands/ImageFolder с одинаковыми basenames в разных классах;
+- содержит byte/hash helpers и shared assertions.
 
-## Pattern guidelines (что соблюдать при добавлении тестов)
+Правила при добавлении тестов:
 
-1. **Spawn-mode picklability**: все функции, передаваемые в DataLoader (`collate_fn`, `transform`, `decode_fn`) — module-level. Никаких lambdas/closures.
-2. **Daemon re-init между эпохами**: если тест итерирует несколько раз — вызывать `daemon.restart()` между прогонами. Pipe-state иначе может interfere.
-3. **Go-тесты**: `make go-test` (= `go test ./internal/... ./cmd/datasetfs/...`). Прежний висящий `cmd/fuse_daemon/main_test.go` удалён вместе с объединением бинарников.
-4. **Timeout-маркер**: длинные тесты помечать `pytest.mark.timeout(N)`. Дефолт pytest-timeout — 0 (нет лимита).
-5. **`-s` для прогрессивного вывода**: добавлять `-s` в `pytest` для длинных тестов (stability, training) чтобы видеть epoch-by-epoch прогресс. Уже в Makefile-таргетах.
+- Все `decode_fn`, `transform`, `collate_fn` должны быть module-level функциями; никаких lambdas/closures для spawn-mode.
+- Для длинных тестов ставить `pytest.mark.timeout(N)` и запускать с `-s`, если нужен progress.
+- Если тест делает несколько эпох/итераций, явно re-init daemon session через fixture API.
+- Не полагаться на `main.py`; для integration scenarios использовать benchmark loaders или dedicated helpers.
+- FUSE/Docker/Linux-only тесты должны gracefully skip, если окружение не готово.
+
+## Оставшиеся gaps
+
+| Gap | Почему важно | Статус |
+|---|---|---|
+| Linux/GPU integration tests | Проверить production-like path, FFCV и GPU starvation | Не закрыто |
+| Multi-rank DDP e2e | `rank/world_size` path есть в client/control/pipeline, но нужен полноценный distributed training test | Частично инфраструктура есть, e2e gap |
+| Long-running remote + mutation + vacuum combined | Интегративный сценарий G13/G14 | Бенчи есть по частям, нужен полный endurance |
+| Crash recovery with WAL replay under real mutation load | Проверить не только bounded failure, но и восстановление состояния | Частично Go/WAL tests, e2e gap |
+| Video / very large object path | `SlotSize=110 MB` ограничивает payload class | Future work |
